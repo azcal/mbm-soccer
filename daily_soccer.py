@@ -14,6 +14,7 @@ from sklearn.metrics import log_loss, brier_score_loss
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import tg_delta
 import engine as E
 
 H = {"User-Agent": "Mozilla/5.0"}
@@ -172,12 +173,23 @@ def run():
         dec.to_csv(os.path.join(LOGS, "graded.csv"), index=False)
 
     tg, ch = os.environ.get("TG_TOKEN"), os.environ.get("TG_CHAT")
-    if tg and ch and (pseudo or alerts):
-        txt = "\n".join(f"{r.league} {r.home} vs {r.away}: {r.p_home:.3f} | DNB {r.home} >= {min_odds(r.p_home):.2f} / {r.away} >= {min_odds(1-r.p_home):.2f}" for _, r in b.iterrows()) if pseudo else "no fixtures in window"
-        if alerts:
-            txt += "\n\u26a0 TRIPWIRE: " + ", ".join(alerts) + " below base rate, stop betting this board"
-        requests.post(f"https://api.telegram.org/bot{tg}/sendMessage",
-                      data={"chat_id": ch, "text": f"MBM soccer DNB\n{txt}"}, timeout=20)
+    if tg and ch:
+        push = {}
+        if pseudo:
+            for _, r in b.iterrows():
+                push[r.id] = {"line": (f"{r.league} {r.home} vs {r.away}: {r.p_home:.3f} | "
+                                       f"DNB {r.home} >= {min_odds(r.p_home):.2f} / "
+                                       f"{r.away} >= {min_odds(1-r.p_home):.2f}"),
+                              "min_odds": min_odds(r.p_home)}
+        mode, lines = tg_delta.gate(LOGS, dt.date.today().strftime("%Y%m%d"), push)
+        if lines or alerts:
+            txt = "\n".join(lines) if lines else "no price changes since the last push"
+            if mode == "delta" and lines:
+                txt = "changes since the last push:\n" + txt
+            if alerts:
+                txt += "\n\u26a0 TRIPWIRE: " + ", ".join(alerts) + " below base rate, stop betting this board"
+            requests.post(f"https://api.telegram.org/bot{tg}/sendMessage",
+                          data={"chat_id": ch, "text": f"MBM soccer DNB\n{txt}"}, timeout=20)
 
 if __name__ == "__main__":
     run()
