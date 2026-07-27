@@ -1,7 +1,8 @@
 name: mbm-soccer-daily
 on:
   schedule:
-    - cron: "0 10 * * *"
+    - cron: "0 1 * 3-10 *"        # 7:00pm MDT, previous evening
+    - cron: "0 2 * 1-2,11-12 *"   # 7:00pm MST, previous evening
   workflow_dispatch: {}
 permissions:
   contents: write
