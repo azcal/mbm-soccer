@@ -15,6 +15,7 @@ from sklearn.metrics import log_loss, brier_score_loss
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import tg_delta
+import board_format as BF
 import engine as E
 
 H = {"User-Agent": "Mozilla/5.0"}
@@ -174,16 +175,25 @@ def run():
 
     tg, ch = os.environ.get("TG_TOKEN"), os.environ.get("TG_CHAT")
     if tg and ch:
-        push = {}
+        push, skipped = {}, 0
         if pseudo:
-            for _, r in b.iterrows():
-                push[r.id] = {"line": (f"{r.league} {r.home} vs {r.away}: {r.p_home:.3f} | "
-                                       f"DNB {r.home} >= {min_odds(r.p_home):.2f} / "
-                                       f"{r.away} >= {min_odds(1-r.p_home):.2f}"),
-                              "min_odds": min_odds(r.p_home)}
+            rows = [(r.date, f"{r.home} vs {r.away}",
+                     r.home if r.p_home >= .5 else r.away,
+                     max(r.p_home, 1 - r.p_home), r.id) for _, r in b.iterrows()]
+            wg = max([len(x[1]) for x in rows] + [10])
+            wp = max([len(x[2]) for x in rows] + [8])
+            for d_, gm, pk, q, gid in rows:
+                if BF.min_odds(q) < BF.PRICE_FLOOR:
+                    skipped += 1
+                    continue
+                push[gid] = {"line": BF.line(d_, gm, pk, q, w_game=wg, w_pick=wp),
+                             "min_odds": BF.min_odds(q)}
         mode, lines = tg_delta.gate(LOGS, dt.date.today().strftime("%Y%m%d"), push)
         if lines or alerts:
             txt = "\n".join(lines) if lines else "no price changes since the last push"
+            if skipped:
+                txt += f"\n({skipped} game{'s' if skipped != 1 else ''} skipped, "\
+                       f"price floor {BF.PRICE_FLOOR:.2f} / {BF.american(BF.PRICE_FLOOR)})"
             if mode == "delta" and lines:
                 txt = "changes since the last push:\n" + txt
             if alerts:
