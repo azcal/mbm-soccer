@@ -16,6 +16,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import tg_delta
 import board_format as BF
+import notify
 import engine as E
 
 H = {"User-Agent": "Mozilla/5.0"}
@@ -173,8 +174,7 @@ def run():
                 alerts.append("Soccer DNB")
         dec.to_csv(os.path.join(LOGS, "graded.csv"), index=False)
 
-    tg, ch = os.environ.get("TG_TOKEN"), os.environ.get("TG_CHAT")
-    if tg and ch:
+    if True:
         push, skipped = {}, 0
         if pseudo:
             rows = [(r.date, f"{r.home} vs {r.away}",
@@ -190,16 +190,18 @@ def run():
                              "min_odds": BF.min_odds(q)}
         mode, lines = tg_delta.gate(LOGS, dt.date.today().strftime("%Y%m%d"), push)
         if lines or alerts:
-            txt = "\n".join(lines) if lines else "no price changes since the last push"
-            if skipped:
-                txt += f"\n({skipped} game{'s' if skipped != 1 else ''} skipped, "\
-                       f"price floor {BF.PRICE_FLOOR:.2f} / {BF.american(BF.PRICE_FLOOR)})"
-            if mode == "delta" and lines:
-                txt = "changes since the last push:\n" + txt
+            body = list(lines) if lines else ["no price changes since the last push"]
+            foot = (f"{skipped} game{'s' if skipped != 1 else ''} skipped, "
+                    f"price floor {BF.PRICE_FLOOR:.2f} / {BF.american(BF.PRICE_FLOOR)}")\
+                   if skipped else None
+            title = "MBM Soccer DNB" + (" · changes since the last push"
+                                     if mode == "delta" and lines else "")
+            colour = notify.GREEN
             if alerts:
-                txt += "\n\u26a0 TRIPWIRE: " + ", ".join(alerts) + " below base rate, stop betting this board"
-            requests.post(f"https://api.telegram.org/bot{tg}/sendMessage",
-                          data={"chat_id": ch, "text": f"MBM soccer DNB\n{txt}"}, timeout=20)
+                body = body + ["", "TRIPWIRE: " + ", ".join(alerts)
+                               + " below base rate, stop betting this board"]
+                colour = notify.RED
+            notify.send(title, body, foot, colour)
 
 if __name__ == "__main__":
     run()
