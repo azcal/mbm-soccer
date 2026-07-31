@@ -134,10 +134,6 @@ def run():
                           "league": rows.league, "home": rows.home, "away": rows.away,
                           "p_home": p, "p_elo": pe.values, "model": "v1"})
         log = pd.concat([log[~log.id.isin(b.id)], b], ignore_index=True)
-        print(f"\n=== MBM soccer DNB board ({len(b)} fixtures) ===")
-        for _, r in b.sort_values(["date", "league"]).iterrows():
-            print(f"{r.date} {r.league:<10} {r.home} vs {r.away}  p(home|no draw)={r.p_home:.3f}  (elo {r.p_elo:.3f})  "
-                  f"DNB value: {r.home} >= {min_odds(r.p_home):.2f} / {r.away} >= {min_odds(1-r.p_home):.2f}")
     else:
         print("no upcoming Big-5 fixtures in horizon")
 
@@ -188,6 +184,13 @@ def run():
                     continue
                 push[gid] = {"line": BF.line(d_, gm, pk, q, w_game=wg, w_pick=wp),
                              "min_odds": BF.min_odds(q)}
+        print("\n=== MBM Soccer DNB board ===")
+        for _v in push.values():
+            print(_v["line"])
+        if skipped:
+            print(f"({skipped} fixture{{'s' if skipped != 1 else ''}} skipped, "
+                  f"price floor {{BF.PRICE_FLOOR:.2f}} / {{BF.american(BF.PRICE_FLOOR)}})")
+
         mode, lines = tg_delta.gate(LOGS, dt.date.today().strftime("%Y%m%d"), push)
         if lines or alerts:
             body = list(lines) if lines else ["no price changes since the last push"]
