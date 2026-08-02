@@ -1,9 +1,23 @@
 name: mbm-soccer-daily
+# One run a day, the evening before, covering the next two days. Two cron lines because
+# Actions runs on UTC and ignores daylight saving.
+#
+# Deliberately no second run. Every other board has something that moves during the day:
+# an injury report, a posted lineup, a tier-S result repricing an Elo. This model reads
+# Elo, goal and shot form, rest and promotion flags, none of which change between the
+# evening board and kickoff, so a refresh would find nothing and be silent every time.
+# The delta gate stays wired up regardless, so adding a second cron pair later is a
+# two-line change and needs nothing else.
 on:
   schedule:
     - cron: "0 1 * 3-10 *"        # 7:00pm MDT, previous evening
     - cron: "0 2 * 1-2,11-12 *"   # 7:00pm MST, previous evening
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force_push:
+        description: "Post the full board even if nothing repriced since the last run"
+        type: boolean
+        default: true
 permissions:
   contents: write
 jobs:
@@ -14,13 +28,75 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - run: pip install -r requirements.txt
+      # Import-only check: fails in seconds on a missing module or a syntax error,
+      # instead of after five league CSVs have downloaded.
+      # Also where a stale shared file is caught: the runner checks the version of
+      # board_format, notify and tg_delta at import. This repo had no import step at all.
+      - run: python -c "import daily_soccer"
       - run: python daily_soccer.py
         env:
-          TG_TOKEN: ${{ secrets.TG_TOKEN }}
-          TG_CHAT: ${{ secrets.TG_CHAT }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          # The quotes matter. "@" starts a reserved indicator in YAML, so a bare
+          # @everyone here is a parse error and GitHub hides the whole workflow.
+          DISCORD_MENTION: "@everyone"
+          # Manual runs post the whole board. With a single scheduled run there is one
+          # full board a day, which is the intent. The box matters when you re-run by
+          # hand after the cron has already written today's cache.
+          #
+          # The chain short-circuits on the event name, so a scheduled run never reads the
+          # inputs context at all. False yields an empty string, and tg_delta only treats
+          # "1", "true" or "yes" as set, so an empty value is the same as unset.
+          FORCE_PUSH: ${{ github.event_name == 'workflow_dispatch' && inputs.force_push && '1' || '' }}
+
+      # Two things the original commit step got wrong.
+      #
+      # It failed outright when the remote had moved since checkout, which happens whenever
+      # a deploy overlaps a scheduled run. This version keeps a copy of what the run
+      # produced, resets onto the remote, restores the copy and retries.
+      #
+      # It also failed when a path was in .gitignore, because `git add` returns non-zero on
+      # an ignored path and `set -e` killed the step. This repo commits data/, because
+      # matches.csv is the accumulating results store that refresh_results rewrites each
+      # run; ignore it and the model loses its history. logs/ matters just as much:
+      # predictions.csv and push_cache.json live there, and without them every run would
+      # push the full board as if it were the first.
       - name: commit state
         run: |
+          set -e
           mkdir -p logs && date > logs/last_run.txt
-          git config user.name mbm-bot && git config user.email bot@mbm
-          git add data/ logs/ && git diff --cached --quiet || git commit -m "soccer $(date +%F)"
-          git push
+          git config user.name mbm-bot
+          git config user.email bot@mbm
+          TRACK=""
+          for p in data logs; do
+            [ -d "$p" ] || continue
+            if git check-ignore -q "$p"; then
+              echo "$p is gitignored, not committing it"
+            else
+              TRACK="$TRACK $p"
+            fi
+          done
+          if [ -z "$TRACK" ]; then
+            echo "nothing tracked to commit"
+            exit 0
+          fi
+          TMP=$(mktemp -d)
+          cp -r $TRACK "$TMP"/ 2>/dev/null || true
+          for i in 1 2 3 4 5; do
+            git add $TRACK
+            if git diff --cached --quiet; then
+              echo "nothing to commit"
+              exit 0
+            fi
+            git commit -q -m "$(basename $GITHUB_REPOSITORY) $(date +%F)"
+            if git push -q; then
+              echo "pushed on attempt $i"
+              exit 0
+            fi
+            echo "remote moved, re-basing this run's output onto it (attempt $i)"
+            git fetch -q origin
+            git reset -q --hard origin/${GITHUB_REF_NAME}
+            for p in $TRACK; do cp -r "$TMP/$p" . 2>/dev/null || true; done
+            sleep $((i * 3))
+          done
+          echo "could not push after 5 attempts"
+          exit 1
