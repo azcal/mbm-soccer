@@ -1,7 +1,8 @@
 """
 MBM Big-5 soccer DNB daily runner (rebuild v1, frozen spec).
 - Refreshes current-season results from football-data.co.uk (tolerates preseason 404s)
-- Ingests upcoming Big-5 fixtures (4-day horizon), predicts P(home | no draw)
+- Ingests upcoming Big-5 fixtures (2-day horizon), predicts P(home | no draw)
+- Discord push routed through tg_delta so refreshes only report what moved
 - Grades logged predictions (draws = push), rolling metrics + last-300 tripwire
 Train window frozen through 2025-26; 2026-27 is the forward test.
 Usage: python daily_soccer.py   (env TEST_FIXTURES=path.csv to inject a test slate)
@@ -19,6 +20,20 @@ import board_format as BF
 import notify
 import engine as E
 
+# Shared files must be at least this new. A minimum rather than an exact match, so a later
+# improvement to a shared file does not force an edit here. Raise it only for a change this
+# runner depends on.
+#   2026-08-03  board_format.line() field separator. Big 5 club names run to 18 characters
+#               and a matchup string to 35, so without it the widest row on every board
+#               renders as an unstyled run-on line.
+SHARED_MIN = "2026-08-03"
+for _mod in (BF, notify, tg_delta):
+    _have = getattr(_mod, "VERSION", "")
+    if _have < SHARED_MIN:
+        raise ImportError(
+            f"{_mod.__name__}.py is version {_have or 'unstamped'}, this runner needs "
+            f"{SHARED_MIN} or newer. Copy the current shared files into this repo.")
+
 H = {"User-Agent": "Mozilla/5.0"}
 DIVS = {"E0": "EPL", "SP1": "LaLiga", "I1": "SerieA", "D1": "Bundesliga", "F1": "Ligue1"}
 MATCHES = os.path.join(HERE, "data", "matches.csv")
@@ -26,6 +41,17 @@ LOGS = os.path.join(HERE, "logs")
 SPEC = json.load(open(os.path.join(HERE, "spec.json")))
 CFG, C, A0 = SPEC["cfg"], SPEC["C"], SPEC["a0"]
 TRAIN_THROUGH = "2526"
+
+# Printed on every pick. The model's number is P(home wins | no draw), which is only a
+# valid price against a draw-no-bet market. Taken on the 1X2 moneyline instead, a draw
+# loses outright rather than pushing, and draws are about a quarter of Big 5 matches. The
+# embed title carries the market, but the row is what gets acted on, so it carries it too.
+MARKET_TAG = SPEC.get("market_tag", "DNB")
+
+# Fixtures are published weeks out, so the horizon controls repetition rather than
+# coverage: at four days a Saturday match posts on four consecutive daily boards. Two
+# keeps a weekend slate on the Friday and Saturday boards and no earlier.
+HORIZON_DAYS = SPEC.get("horizon_days", 2)
 
 MIN_EDGE = 0.05  # required margin: threshold odds pay 5% above model breakeven
 
@@ -75,7 +101,7 @@ def refresh_results():
         print("no current-season results yet (preseason)")
     return m
 
-def fetch_fixtures(horizon_days=4):
+def fetch_fixtures(horizon_days=HORIZON_DAYS):
     tf = os.environ.get("TEST_FIXTURES")
     if tf and os.path.exists(tf):
         d = pd.read_csv(tf)
@@ -170,41 +196,49 @@ def run():
                 alerts.append("Soccer DNB")
         dec.to_csv(os.path.join(LOGS, "graded.csv"), index=False)
 
-    if True:
-        push, skipped = {}, 0
-        if pseudo:
-            rows = [(r.date, f"{r.home} vs {r.away}",
-                     r.home if r.p_home >= .5 else r.away,
-                     max(r.p_home, 1 - r.p_home), r.id) for _, r in b.iterrows()]
-            wg = max([len(x[1]) for x in rows] + [10])
-            wp = max([len(x[2]) for x in rows] + [8])
-            for d_, gm, pk, q, gid in rows:
-                if BF.min_odds(q) < BF.PRICE_FLOOR:
-                    skipped += 1
-                    continue
-                push[gid] = {"line": BF.line(d_, gm, pk, q, w_game=wg, w_pick=wp),
-                             "min_odds": BF.min_odds(q)}
-        print("\n=== MBM Soccer DNB board ===")
-        for _v in push.values():
-            print(_v["line"])
-        if skipped:
-            print(f"({skipped} fixture{{'s' if skipped != 1 else ''}} skipped, "
-                  f"price floor {{BF.PRICE_FLOOR:.2f}} / {{BF.american(BF.PRICE_FLOOR)}})")
+    push, skipped = {}, 0
+    if pseudo:
+        board = [(r.date, f"{r.home} vs {r.away}",
+                  f"{r.home if r.p_home >= .5 else r.away} {MARKET_TAG}",
+                  max(r.p_home, 1 - r.p_home), r.id) for _, r in b.iterrows()]
+        wg = max([len(x[1]) for x in board] + [10])
+        wp = max([len(x[2]) for x in board] + [8])
+        for d_, gm, pk, q, gid in board:
+            if BF.min_odds(q) < BF.PRICE_FLOOR:
+                skipped += 1
+                continue
+            push[gid] = {"line": BF.line(d_, gm, pk, q, w_game=wg, w_pick=wp),
+                         "min_odds": BF.min_odds(q),
+                         # Carries the pick, so a side flipping between runs is reported
+                         # even when the price barely moves. The id already pins the
+                         # fixture, so the matchup itself cannot change under it.
+                         "match": pk}
+    print("\n=== MBM Soccer DNB board ===")
+    for _v in push.values():
+        print(_v["line"])
+    if skipped:
+        print(f"({skipped} fixture{'s' if skipped != 1 else ''} skipped, "
+              f"price floor {BF.PRICE_FLOOR:.2f} / {BF.american(BF.PRICE_FLOOR)})")
 
-        mode, lines = tg_delta.gate(LOGS, dt.date.today().strftime("%Y%m%d"), push)
-        if lines or alerts:
-            body = list(lines) if lines else ["no price changes since the last push"]
-            foot = (f"{skipped} game{'s' if skipped != 1 else ''} skipped, "
-                    f"price floor {BF.PRICE_FLOOR:.2f} / {BF.american(BF.PRICE_FLOOR)}")\
-                   if skipped else None
-            title = "MBM Soccer DNB" + (" · changes since the last push"
-                                     if mode == "delta" and lines else "")
-            colour = notify.GREEN
-            if alerts:
-                body = body + ["", "TRIPWIRE: " + ", ".join(alerts)
-                               + " below base rate, stop betting this board"]
-                colour = notify.RED
-            notify.send(title, body, foot, colour)
+    mode, lines = tg_delta.gate(LOGS, dt.date.today().strftime("%Y%m%d"), push)
+    if lines or alerts:
+        body = list(lines) if lines else ["no price changes since the last push"]
+        foot = (f"{skipped} fixture{'s' if skipped != 1 else ''} skipped, "
+                f"price floor {BF.PRICE_FLOOR:.2f} / {BF.american(BF.PRICE_FLOOR)}")\
+               if skipped else None
+        title = "MBM Soccer DNB" + (" · changes since the last push"
+                                    if mode == "delta" and lines else "")
+        colour = notify.GREEN
+        if alerts:
+            body = body + ["", "TRIPWIRE: " + ", ".join(alerts)
+                           + " below base rate, stop betting this board"]
+            colour = notify.RED
+        notify.send(title, body, foot, colour)
+    elif not push:
+        print("no board to send")
+    else:
+        print("board unchanged since the last push, nothing sent")
+
 
 if __name__ == "__main__":
     run()
