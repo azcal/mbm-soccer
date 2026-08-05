@@ -1,0 +1,15 @@
+{
+ "_comment": "ESPN displayName -> football-data club name, scoped per league because 'Santos' is a Brasileirao club while 'Santos Laguna' is a Liga MX one, and a flat map would bridge them. Only needed where norm_team does not already match; it handles accents, hyphenated state codes and club-type words unaided, covering 7 of 8 Brasileirao and 3 of 4 Liga MX clubs on live feeds. Entries are only proposed where a qualifier can be dropped without ambiguity: 'Atletico' is refused because both Atletico-MG and Atletico GO exist. The runner prints any unmatched fixture by name; add it under its league and rerun.",
+ "Brasileirao": {
+  "America": "America MG",
+  "Athletico": "Athletico-PR",
+  "Botafogo": "Botafogo RJ",
+  "Flamengo": "Flamengo RJ"
+ },
+ "LigaMX": {
+  "Santos": "Santos Laguna"
+ },
+ "MLS": {
+  "Chivas": "Chivas USA"
+ }
+}
