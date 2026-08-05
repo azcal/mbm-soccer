@@ -19,6 +19,7 @@ import tg_delta
 import board_format as BF
 import notify
 import engine as E
+import soccer_americas as AM
 
 # Shared files must be at least this new. A minimum rather than an exact match, so a later
 # improvement to a shared file does not force an edit here. Raise it only for a change this
@@ -27,7 +28,7 @@ import engine as E
 #               and a matchup string to 35, so without it the widest row on every board
 #               renders as an unstyled run-on line.
 SHARED_MIN = "2026-08-03"
-for _mod in (BF, notify, tg_delta):
+for _mod in (BF, notify, tg_delta, AM):
     _have = getattr(_mod, "VERSION", "")
     if _have < SHARED_MIN:
         raise ImportError(
@@ -53,7 +54,19 @@ MARKET_TAG = SPEC.get("market_tag", "DNB")
 # keeps a weekend slate on the Friday and Saturday boards and no earlier.
 HORIZON_DAYS = SPEC.get("horizon_days", 2)
 
-MIN_EDGE = 0.05  # required margin: threshold odds pay 5% above model breakeven
+# The Americas boards. Big 5 above is untouched by all of this: separate spec, separate
+# feature set, separate frozen holdout. See soccer_americas.py for why they are not pooled.
+NEW = SPEC.get("new_leagues", {})
+NEW_BOARD = set(NEW.get("board", []))        # Brasileirao, LigaMX
+NEW_RETIRED = set(NEW.get("retired", []))    # MLS: predicted and graded, never pushed
+NEW_MATCHES = os.path.join(HERE, "data", "americas_matches.csv")
+NEW_ALIAS = os.path.join(HERE, "data", "espn_soccer_alias.json")
+LG_CODE = {"Brasileirao": "BRA", "LigaMX": "MEX", "MLS": "MLS"}
+
+# Tracks board_format rather than restating it. This is the console-side copy, and a
+# local 0.05 here while board_format ran at 0.00 meant the Actions log and Discord
+# quoted different prices for the same game.
+MIN_EDGE = BF.MIN_EDGE
 
 def min_odds(p):
     import math
@@ -119,6 +132,114 @@ def fetch_fixtures(horizon_days=HORIZON_DAYS):
     today = pd.Timestamp(dt.date.today())
     d = d[(d.date >= today) & (d.date <= today + pd.Timedelta(days=horizon_days))]
     return d[["league", "date", "HomeTeam", "AwayTeam"]]
+
+def run_americas():
+    """Board Brasileirao and LigaMX; predict, log and grade MLS without pushing it.
+
+    Returns (rows, alerts). A row is a dict the caller folds into the shared width pass,
+    so both boards share one column layout and one delta gate.
+
+    MLS is retired rather than deleted. Its head measured +0.0012 over its own Elo floor on
+    the 2025 holdout at p=0.85, so publishing its prices would be publishing a number with
+    no demonstrated content. It is still forecast and graded on every run, which keeps the
+    decision under measurement instead of resting on one holdout forever. Same treatment as
+    the NCAAF selection rule.
+    """
+    cfg, C_, a0_ = NEW["cfg"], NEW["C"], NEW["a0"]
+    store = AM.refresh_results(NEW_MATCHES)
+    if store is None or not len(store):
+        print("  americas: no results store, skipping")
+        return [], []
+    store["date"] = pd.to_datetime(store.date)
+    known = {lg: set(g.HomeTeam) | set(g.AwayTeam) for lg, g in store.groupby("league")}
+    alias = AM.load_alias(NEW_ALIAS)
+    fx = AM.fetch_fixtures(known, alias, HORIZON_DAYS)
+    if len(fx):
+        fx = fx.assign(
+            season=[AM.season_of(r.league, r.date, store) for r in fx.itertuples()],
+            FTHG=np.nan, FTAG=np.nan, HS=np.nan, AS=np.nan, HST=np.nan, AST=np.nan)
+    print(f"  americas fixtures in {HORIZON_DAYS}d: {len(fx)}")
+
+    f = AM.build_features(store, fx, cfg, E)
+    tr = (f.date < pd.Timestamp("2026-01-01")) & (f.date >= pd.Timestamp("2014-01-01")) \
+         & f.hg.notna() & (~f.draw)
+    sc = StandardScaler().fit(f.loc[tr, AM.FEATS].values)
+    mdl = LogisticRegression(C=C_, max_iter=2000).fit(
+        sc.transform(f.loc[tr, AM.FEATS].values), f.loc[tr, "y"].values)
+    base = float(f.loc[tr, "y"].mean())
+
+    pred_path = os.path.join(LOGS, "americas_predictions.csv")
+    log = pd.read_csv(pred_path) if os.path.exists(pred_path) else pd.DataFrame(
+        columns=["id", "date", "league", "home", "away", "p_home", "p_elo",
+                 "boarded", "model"])
+
+    rows = []
+    up = f[f.hg.isna()]
+    if len(up):
+        p = AM.np.asarray(mdl.predict_proba(sc.transform(up[AM.FEATS].values))[:, 1])
+        p = E.shrink(p, up.min_gp.values, a0_)
+        pe = 1 / (1 + 10 ** (-((up.h_elo + cfg["HA"]) - up.a_elo) / 400))
+        nb = pd.DataFrame({
+            "id": up.league + "|" + pd.to_datetime(up.date).dt.strftime("%Y-%m-%d")
+                  + "|" + up.home + "|" + up.away,
+            "date": pd.to_datetime(up.date).dt.strftime("%Y-%m-%d"),
+            "league": up.league.values, "home": up.home.values, "away": up.away.values,
+            "p_home": p, "p_elo": pe.values,
+            "boarded": [int(l in NEW_BOARD) for l in up.league],
+            "model": ["v1" if l in NEW_BOARD else "v1-retired" for l in up.league]})
+        log = pd.concat([log[~log.id.isin(nb.id)], nb], ignore_index=True)
+        for _, r in nb.sort_values(["date", "league"]).iterrows():
+            if not r.boarded:
+                continue
+            pick = r.home if r.p_home >= .5 else r.away
+            rows.append({"date": r.date, "id": r.id, "p": max(r.p_home, 1 - r.p_home),
+                         # League prefix, because the Big 5 rows carry no league and a
+                         # channel showing both needs to say which is which.
+                         "game": f"{LG_CODE.get(r.league, r.league)} {r.home} vs {r.away}",
+                         "pick": f"{pick} {MARKET_TAG}"})
+        n_ret = int((~nb.boarded.astype(bool)).sum())
+        print(f"  americas board: {len(rows)} pushed, {n_ret} logged only (retired league)")
+
+    # ---- grade ----
+    res = store.assign(id=store.league + "|"
+                       + pd.to_datetime(store.date).dt.strftime("%Y-%m-%d")
+                       + "|" + store.HomeTeam + "|" + store.AwayTeam)
+    got = res.set_index("id")[["FTHG", "FTAG"]]
+    got = got[~got.index.duplicated(keep="last")]
+    j = log.id.map(got.FTHG), log.id.map(got.FTAG)
+    log["result"] = np.where(j[0].isna(), np.nan,
+                             np.where(j[0] == j[1], -1.0, (j[0] > j[1]).astype(float)))
+    os.makedirs(LOGS, exist_ok=True)
+    log.to_csv(pred_path, index=False)
+
+    alerts = []
+    dec = log[log.result.isin([0.0, 1.0])]
+    if len(dec) >= 50:
+        print(f"\n  americas rolling grade, decided only "
+              f"(pushes: {(log.result == -1).sum():.0f}):")
+        for lg in sorted(dec.league.unique()):
+            d = dec[dec.league == lg]
+            if len(d) < 25:
+                continue
+            y = d.result.astype(int).values
+            pc = np.clip(d.p_home.values.astype(float), 1e-6, 1 - 1e-6)
+            pf = np.clip(d.p_elo.values.astype(float), 1e-6, 1 - 1e-6)
+            tag = "" if lg in NEW_BOARD else "  [RETIRED, not boarded]"
+            print(f"    {lg:12} n={len(y):>4}  LL={log_loss(y, pc):.4f}  "
+                  f"elo={log_loss(y, pf):.4f}  edge={log_loss(y, pf) - log_loss(y, pc):+.4f}  "
+                  f"hit={np.mean((pc > .5) == (y == 1)):.3f}{tag}")
+        w = dec[dec.league.isin(NEW_BOARD)].tail(300)
+        if len(w) >= 300:
+            yy = w.result.astype(int).values
+            edge = log_loss(yy, np.full(len(yy), base)) - \
+                log_loss(yy, np.clip(w.p_home.values.astype(float), 1e-6, 1 - 1e-6))
+            print(f"    last-300 boarded edge vs base: {edge:+.4f}  "
+                  f"[{'OK' if edge > 0 else 'TRIPWIRE: bench review'}]")
+            if edge <= 0:
+                alerts.append("Americas DNB")
+        dec.to_csv(os.path.join(LOGS, "americas_graded.csv"), index=False)
+    return rows, alerts
+
 
 def run():
     m = refresh_results()
@@ -196,14 +317,30 @@ def run():
                 alerts.append("Soccer DNB")
         dec.to_csv(os.path.join(LOGS, "graded.csv"), index=False)
 
-    push, skipped = {}, 0
+    # ---------------------------------------------------------------- Americas
+    new_rows, new_alerts = [], []
+    if NEW:
+        try:
+            new_rows, new_alerts = run_americas()
+        except Exception as ex:
+            # Never let a second board take the first one down with it.
+            print(f"americas board failed: {type(ex).__name__}: {ex}")
+    alerts = alerts + new_alerts
+
+    # Both boards go through one width pass and one delta gate, so the two share a column
+    # layout and a single push cache rather than drifting apart.
+    entries = []
     if pseudo:
-        board = [(r.date, f"{r.home} vs {r.away}",
-                  f"{r.home if r.p_home >= .5 else r.away} {MARKET_TAG}",
-                  max(r.p_home, 1 - r.p_home), r.id) for _, r in b.iterrows()]
-        wg = max([len(x[1]) for x in board] + [10])
-        wp = max([len(x[2]) for x in board] + [8])
-        for d_, gm, pk, q, gid in board:
+        entries += [(r.date, f"{r.home} vs {r.away}",
+                     f"{r.home if r.p_home >= .5 else r.away} {MARKET_TAG}",
+                     max(r.p_home, 1 - r.p_home), r.id) for _, r in b.iterrows()]
+    entries += [(r["date"], r["game"], r["pick"], r["p"], r["id"]) for r in new_rows]
+
+    push, skipped = {}, 0
+    if entries:
+        wg = max([len(x[1]) for x in entries] + [10])
+        wp = max([len(x[2]) for x in entries] + [8])
+        for d_, gm, pk, q, gid in entries:
             if BF.min_odds(q) < BF.PRICE_FLOOR:
                 skipped += 1
                 continue
@@ -213,6 +350,7 @@ def run():
                          # even when the price barely moves. The id already pins the
                          # fixture, so the matchup itself cannot change under it.
                          "match": pk}
+
     print("\n=== MBM Soccer DNB board ===")
     for _v in push.values():
         print(_v["line"])
