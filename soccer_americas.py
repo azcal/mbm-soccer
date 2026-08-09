@@ -176,6 +176,88 @@ def fetch_fixtures(known, alias, horizon_days=2, leagues=None):
     return pd.DataFrame(rows)
 
 
+def backfill_from_espn(store, alias, days=30):
+    """Results football-data has not published yet, pulled from ESPN.
+
+    football-data updates a couple of times a week, so a board that refuses to publish on
+    stale data goes quiet for days at a time. Measured 2026-08-08: Brasileirao's file
+    stopped on 07-31 with four matches played since, MLS on 08-02 with one. This closes
+    that gap the same way the WNBA board closes the wehoop gap.
+
+    Lossless here, unlike Big 5. The `new/` files carry no shot columns, so the engine
+    already runs these leagues on goals alone and ESPN supplies exactly what is used.
+
+    Returns rows in the store's own shape. Empty on any failure, and the caller then keeps
+    whatever it had.
+    """
+    out = []
+    for lg, slug in ESPN_SLUG.items():
+        sub = store[store.league == lg]
+        if not sub.empty:
+            last = pd.to_datetime(sub.date).max().date()
+        else:
+            last = dt.date.today() - dt.timedelta(days=days)
+        start = max(last + dt.timedelta(days=1), dt.date.today() - dt.timedelta(days=days))
+        if start > dt.date.today():
+            continue
+        idx = {norm_team(n): n for n in (set(sub.HomeTeam) | set(sub.AwayTeam))}
+        amap = alias.get(lg, {}) if isinstance(alias.get(lg), dict) else {}
+
+        def match(disp, short):
+            for cand in (amap.get(disp), amap.get(short), disp, short):
+                if cand and norm_team(cand) in idx:
+                    return idx[norm_team(cand)]
+            return None
+
+        rng = f"{start:%Y%m%d}-{dt.date.today():%Y%m%d}"
+        try:
+            r = requests.get(f"{ESPN}/{slug}/scoreboard", headers=ESPN_H, timeout=45,
+                             params={"dates": rng, "limit": 300}).json()
+        except Exception as ex:
+            print(f"  {lg}: result backfill unavailable ({type(ex).__name__})")
+            continue
+        skipped = []
+        for e in r.get("events", []):
+            if not e.get("status", {}).get("type", {}).get("completed"):
+                continue
+            c = e["competitions"][0]
+            t = {x["homeAway"]: x for x in c.get("competitors", [])}
+            if "home" not in t or "away" not in t:
+                continue
+            h = match(t["home"]["team"].get("displayName", ""),
+                      t["home"]["team"].get("shortDisplayName", ""))
+            a = match(t["away"]["team"].get("displayName", ""),
+                      t["away"]["team"].get("shortDisplayName", ""))
+            try:
+                hg, ag = float(t["home"]["score"]), float(t["away"]["score"])
+            except (TypeError, ValueError):
+                continue
+            if not h or not a:
+                skipped.append(f"{t['away']['team'].get('displayName')} @ "
+                               f"{t['home']['team'].get('displayName')}")
+                continue
+            when = pd.Timestamp(e["date"]).tz_localize(None).normalize()
+            out.append({"date": when, "season": season_of(lg, when, store), "league": lg,
+                        "HomeTeam": h, "AwayTeam": a, "FTHG": hg, "FTAG": ag,
+                        "HS": np.nan, "AS": np.nan, "HST": np.nan, "AST": np.nan})
+        if skipped:
+            print(f"  {lg}: {len(skipped)} result(s) skipped, club names not matched: "
+                  + ", ".join(skipped[:4]))
+    if not out:
+        return pd.DataFrame()
+    add = pd.DataFrame(out)
+    have = set(store.league + "|" + pd.to_datetime(store.date).dt.strftime("%Y-%m-%d")
+               + "|" + store.HomeTeam + "|" + store.AwayTeam)
+    key = (add.league + "|" + add.date.dt.strftime("%Y-%m-%d") + "|"
+           + add.HomeTeam + "|" + add.AwayTeam)
+    add = add[~key.isin(have)]
+    if len(add):
+        print(f"  backfilled {len(add)} result(s) from ESPN that football-data has not "
+              f"published: " + ", ".join(f"{k} {v}" for k, v in
+                                         add.league.value_counts().items()))
+    return add
+
+
 def season_of(league, when, store):
     """Which season label a future fixture belongs to.
 

@@ -152,8 +152,15 @@ def run_americas():
         print("  americas: no results store, skipping")
         return [], [], None
     store["date"] = pd.to_datetime(store.date)
-    known = {lg: set(g.HomeTeam) | set(g.AwayTeam) for lg, g in store.groupby("league")}
     alias = AM.load_alias(NEW_ALIAS)
+    # football-data publishes a couple of times a week, so fill the tail from ESPN before
+    # anything is measured or modelled. Lossless for these leagues: the new/ files carry no
+    # shot columns, so goals are all the engine uses and goals are what ESPN gives.
+    _add = AM.backfill_from_espn(store, alias)
+    if len(_add):
+        store = pd.concat([store, _add], ignore_index=True).sort_values("date")
+        store.to_csv(NEW_MATCHES, index=False)
+    known = {lg: set(g.HomeTeam) | set(g.AwayTeam) for lg, g in store.groupby("league")}
     # Freshness for THESE leagues, not Big 5's. The first version checked only the Big 5
     # slugs, so a board publishing Brasileirao carried a footer describing English data.
     # season_types is None because ESPN puts a league id in that field for soccer.
