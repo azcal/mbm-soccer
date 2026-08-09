@@ -43,7 +43,12 @@ import requests
 
 VERSION = "2026-08-03"
 
-H = {"User-Agent": "Mozilla/5.0"}
+H = {"User-Agent": "Mozilla/5.0"}          # football-data.co.uk, fine with a UA
+# ESPN 403s ANY custom User-Agent and only serves the requests default. Measured
+# 2026-08-05 on the WNBA scoreboard: no header 200, "Mozilla/5.0" 403, an honest
+# identifier with contact details 403, a full browser header set 403. mbm-wnba has
+# always worked because it never set one. Do not "fix" this by adding a UA.
+ESPN_H = {}
 SRC = {"USA": "MLS", "MEX": "LigaMX", "BRA": "Brasileirao"}
 ESPN_SLUG = {"MLS": "usa.1", "LigaMX": "mex.1", "Brasileirao": "bra.1"}
 ESPN = "https://site.api.espn.com/apis/site/v2/sports/soccer"
@@ -131,7 +136,7 @@ def fetch_fixtures(known, alias, horizon_days=2, leagues=None):
         if leagues and lg not in leagues:
             continue
         try:
-            r = requests.get(f"{ESPN}/{slug}/scoreboard", headers=H, timeout=45,
+            r = requests.get(f"{ESPN}/{slug}/scoreboard", headers=ESPN_H, timeout=45,
                              params={"dates": rng, "limit": 200}).json()
         except Exception as ex:
             print(f"  {lg}: fixture feed unavailable ({type(ex).__name__})")

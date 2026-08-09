@@ -20,6 +20,7 @@ import board_format as BF
 import notify
 import engine as E
 import soccer_americas as AM
+import freshness as FR
 
 # Shared files must be at least this new. A minimum rather than an exact match, so a later
 # improvement to a shared file does not force an edit here. Raise it only for a change this
@@ -28,7 +29,7 @@ import soccer_americas as AM
 #               and a matchup string to 35, so without it the widest row on every board
 #               renders as an unstyled run-on line.
 SHARED_MIN = "2026-08-03"
-for _mod in (BF, notify, tg_delta, AM):
+for _mod in (BF, notify, tg_delta, AM, FR):
     _have = getattr(_mod, "VERSION", "")
     if _have < SHARED_MIN:
         raise ImportError(
@@ -256,6 +257,34 @@ def run():
     g_all = g_all.sort_values("date").reset_index(drop=True)
     for s in g_all.season.unique():
         extend_seasons(str(s).zfill(4))
+    # Big 5 leagues, each probed separately: a board that publishes five competitions is
+    # only as current as its worst one. season_types is None because ESPN puts a league id
+    # in that field for soccer, not the 1/2/3 US convention, so the usual filter would
+    # reject every match.
+    _slug = {"EPL": "soccer/eng.1", "LaLiga": "soccer/esp.1", "SerieA": "soccer/ita.1",
+             "Bundesliga": "soccer/ger.1", "Ligue1": "soccer/fra.1"}
+    _played = g_all[g_all.hg.notna()] if "hg" in g_all.columns else g_all[g_all.FTHG.notna()]
+    _entries, _worst = [], 0
+    for _lg, _sl in _slug.items():
+        _sub = _played[_played.league == _lg] if "league" in _played.columns else _played
+        if not len(_sub):
+            continue
+        _nw = pd.to_datetime(_sub.date).max().date()
+        _m, _ = FR.missed_games(_sl, _nw, season_types=None)
+        _worst = max(_worst, abs(_m))
+        _entries.append((_lg, _nw, _sl))
+    if _entries:
+        _ok, _lines = FR.check_multi(_entries, season_types=None)
+        for _l in _lines:
+            print(_l)
+        if not _ok and not FR.override():
+            raise SystemExit("Soccer: refusing to board on stale data")
+        _newest = max(e[1] for e in _entries)
+        FRESH_LINE = FR.board_line(_newest, checked=(_newest, _worst))
+    else:
+        FRESH_LINE = None
+    SEASON_LINE = None
+
     f = E.add_diffs(E.build(g_all, CFG))
     tr = f.season.apply(lambda s: E.SEASONS.index(str(s).zfill(4)) <= E.SEASONS.index(TRAIN_THROUGH)) \
         & f.hg.notna() & (~f.draw)
@@ -274,6 +303,8 @@ def run():
         rows = f[f.hg.isna()].copy()
         p = mdl.predict_proba(sc.transform(rows[E.FEATS].values))[:, 1]
         p = E.shrink(p, rows.min_gp.values, A0)
+        # engine.shrink ramps to full weight at 6 games; say so while it is still ramping.
+        SEASON_LINE = FR.season_note(float(rows.min_gp.min()), 6, "the thinner side")
         pe = 1/(1+10**(-((rows.h_elo + CFG["HA"]) - rows.a_elo)/400))
         b = pd.DataFrame({"id": rows.league + "|" + pd.to_datetime(rows.date).dt.strftime("%Y-%m-%d")
                                 + "|" + rows.home + "|" + rows.away,
@@ -371,6 +402,9 @@ def run():
             body = body + ["", "TRIPWIRE: " + ", ".join(alerts)
                            + " below base rate, stop betting this board"]
             colour = notify.RED
+        # The board carries its own provenance. A reader should not have to trust that
+        # the data was current; the row says so.
+        foot = " · ".join([x for x in (FRESH_LINE, SEASON_LINE, foot) if x])
         notify.send(title, body, foot, colour)
     elif not push:
         print("no board to send")
