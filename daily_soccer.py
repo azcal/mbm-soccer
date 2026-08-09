@@ -62,7 +62,18 @@ NEW_BOARD = set(NEW.get("board", []))        # Brasileirao, LigaMX
 NEW_RETIRED = set(NEW.get("retired", []))    # MLS: predicted and graded, never pushed
 NEW_MATCHES = os.path.join(HERE, "data", "americas_matches.csv")
 NEW_ALIAS = os.path.join(HERE, "data", "espn_soccer_alias.json")
-LG_CODE = {"Brasileirao": "BRA", "LigaMX": "MEX", "MLS": "MLS"}
+# Country codes throughout, so every soccer row names its competition. BRA and MEX were
+# already country codes, so the Big 5 follow the same convention rather than a mix of
+# country codes and league abbreviations.
+# Heading shown above that league's fixtures. Grouping beats a per-row code: a reader
+# scanning for one competition finds it as a block rather than picking prefixes out of a
+# mixed list.
+LG_NAME = {"EPL": "Premier League", "LaLiga": "La Liga", "SerieA": "Serie A",
+           "Bundesliga": "Bundesliga", "Ligue1": "Ligue 1",
+           "Brasileirao": "Brasileirao Serie A", "LigaMX": "Liga MX", "MLS": "MLS"}
+# Order they appear in, so the board reads the same way every night.
+LG_ORDER = ["EPL", "LaLiga", "SerieA", "Bundesliga", "Ligue1",
+            "Brasileirao", "LigaMX", "MLS"]
 
 # Tracks board_format rather than restating it. This is the console-side copy, and a
 # local 0.05 here while board_format ran at 0.00 meant the Actions log and Discord
@@ -226,7 +237,7 @@ def run_americas():
             rows.append({"date": r.date, "id": r.id, "p": max(r.p_home, 1 - r.p_home),
                          # League prefix, because the Big 5 rows carry no league and a
                          # channel showing both needs to say which is which.
-                         "game": f"{LG_CODE.get(r.league, r.league)} {r.home} vs {r.away}",
+                         "game": f"{r.home} vs {r.away}",
                          "pick": f"{pick} {MARKET_TAG}"})
         n_ret = int((~nb.boarded.astype(bool)).sum())
         print(f"  americas board: {len(rows)} pushed, {n_ret} logged only (retired league)")
@@ -419,7 +430,22 @@ def run():
         print(f"({skipped} fixture{'s' if skipped != 1 else ''} skipped, "
               f"price floor {BF.PRICE_FLOOR:.2f} / {BF.american(BF.PRICE_FLOOR)})")
 
-    mode, lines = tg_delta.gate(LOGS, dt.date.today().strftime("%Y%m%d"), push)
+    # Keyed, so whatever survives the gate can be regrouped under its league. On a delta
+    # push only some fixtures go out, so headings must be built from what was actually
+    # sent rather than from the full board.
+    mode, keyed = tg_delta.gate(LOGS, dt.date.today().strftime("%Y%m%d"), push,
+                                with_keys=True)
+    by_lg = {}
+    for _k, _ln in keyed:
+        by_lg.setdefault(str(_k).split("|")[0], []).append(_ln)
+    lines = []
+    for _lg in LG_ORDER + [x for x in by_lg if x not in LG_ORDER]:
+        if _lg not in by_lg:
+            continue
+        if lines:
+            lines.append("")
+        lines.append(f"__{LG_NAME.get(_lg, _lg)}__")
+        lines.extend(by_lg[_lg])
     if lines or alerts:
         body = list(lines) if lines else ["no price changes since the last push"]
         foot = (f"{skipped} fixture{'s' if skipped != 1 else ''} skipped, "
