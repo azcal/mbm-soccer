@@ -150,10 +150,33 @@ def run_americas():
     store = AM.refresh_results(NEW_MATCHES)
     if store is None or not len(store):
         print("  americas: no results store, skipping")
-        return [], []
+        return [], [], None
     store["date"] = pd.to_datetime(store.date)
     known = {lg: set(g.HomeTeam) | set(g.AwayTeam) for lg, g in store.groupby("league")}
     alias = AM.load_alias(NEW_ALIAS)
+    # Freshness for THESE leagues, not Big 5's. The first version checked only the Big 5
+    # slugs, so a board publishing Brasileirao carried a footer describing English data.
+    # season_types is None because ESPN puts a league id in that field for soccer.
+    am_slug = {"Brasileirao": "soccer/bra.1", "LigaMX": "soccer/mex.1", "MLS": "soccer/usa.1"}
+    am_entries, am_worst, am_newest = [], 0, None
+    for _lg in sorted(set(store.league) & set(am_slug)):
+        _sub = store[store.league == _lg]
+        if not len(_sub):
+            continue
+        _nw = pd.to_datetime(_sub.date).max().date()
+        _m, _ = FR.missed_games(am_slug[_lg], _nw, season_types=None)
+        am_worst = max(am_worst, abs(_m))
+        am_newest = _nw if am_newest is None else max(am_newest, _nw)
+        am_entries.append((_lg, _nw, am_slug[_lg]))
+    if am_entries:
+        _ok, _lines = FR.check_multi(am_entries, season_types=None)
+        for _l in _lines:
+            print("  " + _l)
+        if not _ok and not FR.override():
+            print("  americas: stale, not boarding these leagues")
+            return [], [], None
+    AM_FRESH = FR.board_line(am_newest, checked=(am_newest, am_worst)) if am_newest else None
+
     fx = AM.fetch_fixtures(known, alias, HORIZON_DAYS)
     if len(fx):
         fx = fx.assign(
@@ -239,7 +262,7 @@ def run_americas():
             if edge <= 0:
                 alerts.append("Americas DNB")
         dec.to_csv(os.path.join(LOGS, "americas_graded.csv"), index=False)
-    return rows, alerts
+    return rows, alerts, AM_FRESH
 
 
 def run():
@@ -349,10 +372,10 @@ def run():
         dec.to_csv(os.path.join(LOGS, "graded.csv"), index=False)
 
     # ---------------------------------------------------------------- Americas
-    new_rows, new_alerts = [], []
+    new_rows, new_alerts, AM_FRESH = [], [], None
     if NEW:
         try:
-            new_rows, new_alerts = run_americas()
+            new_rows, new_alerts, AM_FRESH = run_americas()
         except Exception as ex:
             # Never let a second board take the first one down with it.
             print(f"americas board failed: {type(ex).__name__}: {ex}")
@@ -404,7 +427,14 @@ def run():
             colour = notify.RED
         # The board carries its own provenance. A reader should not have to trust that
         # the data was current; the row says so.
-        foot = " · ".join([x for x in (FRESH_LINE, SEASON_LINE, foot) if x])
+        # Each board's own provenance. A run that publishes only the Americas must not
+        # carry a Big 5 freshness line, and vice versa.
+        _fresh = []
+        if pseudo and FRESH_LINE:
+            _fresh.append("Big 5 " + FRESH_LINE)
+        if new_rows and AM_FRESH:
+            _fresh.append("Americas " + AM_FRESH)
+        foot = " · ".join([x for x in (" · ".join(_fresh), SEASON_LINE, foot) if x])
         notify.send(title, body, foot, colour)
     elif not push:
         print("no board to send")
