@@ -21,6 +21,7 @@ import notify
 import engine as E
 import soccer_americas as AM
 import freshness as FR
+import mbm_checks as CHK
 
 # Shared files must be at least this new. A minimum rather than an exact match, so a later
 # improvement to a shared file does not force an edit here. Raise it only for a change this
@@ -29,7 +30,7 @@ import freshness as FR
 #               and a matchup string to 35, so without it the widest row on every board
 #               renders as an unstyled run-on line.
 SHARED_MIN = "2026-08-03"
-for _mod in (BF, notify, tg_delta, AM, FR):
+for _mod in (BF, notify, tg_delta, AM, FR, CHK):
     _have = getattr(_mod, "VERSION", "")
     if _have < SHARED_MIN:
         raise ImportError(
@@ -145,7 +146,7 @@ def fetch_fixtures(horizon_days=HORIZON_DAYS):
     d = d[(d.date >= today) & (d.date <= today + pd.Timedelta(days=horizon_days))]
     return d[["league", "date", "HomeTeam", "AwayTeam"]]
 
-def run_americas():
+def run_americas(chk):
     """Board Brasileirao and LigaMX; predict, log and grade MLS without pushing it.
 
     Returns (rows, alerts). A row is a dict the caller folds into the shared width pass,
@@ -182,12 +183,12 @@ def run_americas():
         if not len(_sub):
             continue
         _nw = pd.to_datetime(_sub.date).max().date()
-        _m, _ = FR.missed_games(am_slug[_lg], _nw, season_types=None)
+        _m, _, _probe_failed = FR.missed_games(am_slug[_lg], _nw, season_types=None)
         am_worst = max(am_worst, abs(_m))
         am_newest = _nw if am_newest is None else max(am_newest, _nw)
         am_entries.append((_lg, _nw, am_slug[_lg]))
     if am_entries:
-        _ok, _lines = FR.check_multi(am_entries, season_types=None)
+        _ok, _lines = FR.check_multi(am_entries, season_types=None, grace_days=14, reporter=chk)
         for _l in _lines:
             print("  " + _l)
         if not _ok and not FR.override():
@@ -284,6 +285,7 @@ def run_americas():
 
 
 def run():
+    chk = CHK.Reporter("Soccer", dt.date.today().strftime("%Y%m%d"))
     m = refresh_results()
     fx = fetch_fixtures()
     pseudo = []
@@ -311,12 +313,11 @@ def run():
         if not len(_sub):
             continue
         _nw = pd.to_datetime(_sub.date).max().date()
-        _m, _ = FR.missed_games(_sl, _nw, season_types=None)
+        _m, _, _probe_failed = FR.missed_games(_sl, _nw, season_types=None)
         _worst = max(_worst, abs(_m))
         _entries.append((_lg, _nw, _sl))
     if _entries:
-        _ok, _lines = FR.check_multi(_entries, season_types=None)
-        for _l in _lines:
+        _ok, _lines = FR.check_multi(_entries, season_types=None, grace_days=14, reporter=chk)
             print(_l)
         if not _ok and not FR.override():
             raise SystemExit("Soccer: refusing to board on stale data")
@@ -393,7 +394,7 @@ def run():
     new_rows, new_alerts, AM_FRESH = [], [], None
     if NEW:
         try:
-            new_rows, new_alerts, AM_FRESH = run_americas()
+            new_rows, new_alerts, AM_FRESH = run_americas(chk)
         except Exception as ex:
             # Never let a second board take the first one down with it.
             print(f"americas board failed: {type(ex).__name__}: {ex}")
@@ -433,6 +434,7 @@ def run():
     # Keyed, so whatever survives the gate can be regrouped under its league. On a delta
     # push only some fixtures go out, so headings must be built from what was actually
     # sent rather than from the full board.
+    chk.finish(strict=True, require=["freshness"])
     mode, keyed = tg_delta.gate(LOGS, dt.date.today().strftime("%Y%m%d"), push,
                                 with_keys=True)
     by_lg = {}
