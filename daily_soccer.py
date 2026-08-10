@@ -317,7 +317,8 @@ def run():
         _worst = max(_worst, abs(_m))
         _entries.append((_lg, _nw, _sl))
     if _entries:
-            _ok, _lines = FR.check_multi(_entries, season_types=None, grace_days=14, reporter=chk)
+        _ok, _lines = FR.check_multi(_entries, season_types=None, grace_days=14, reporter=chk)
+        for _l in _lines:
             print(_l)
         if not _ok and not FR.override():
             raise SystemExit("Soccer: refusing to board on stale data")
