@@ -107,6 +107,21 @@ def gate(logs_dir, datestr, board, tol=DEFAULT_TOL, cache_name=CACHE_NAME,
                 keyed.append((k, lines[-1]))
 
     os.makedirs(logs_dir, exist_ok=True)
+    # A fixture that was on the last board and is not on this one. Happens when an
+    # opponent is replaced and the source issues a new id, so the old bout simply vanishes
+    # rather than changing. Without this the channel keeps a published pick for a fight
+    # that will never happen, and nothing ever says otherwise. Measured 2026-08-08: two
+    # UFC bouts were boarded, both opponents were swapped, and neither was withdrawn.
+    if not first:
+        gone = [(k, v) for k, v in old.items() if k not in board]
+        if gone:
+            lines.append("")                      # its own block, not a note on the row above
+            keyed.append(("", ""))
+            for k, v in gone:
+                what = v.get("match") or v.get("line", "").strip()
+                lines.append(f"{indent}withdrawn: {what} is no longer on the card")
+                keyed.append((k, lines[-1]))
+
     with open(path, "w") as fh:
         json.dump({"date": datestr, "board": {str(k): v for k, v in board.items()}}, fh)
     # with_keys hands back (key, line) pairs so a caller can regroup what survived the

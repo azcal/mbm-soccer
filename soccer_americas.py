@@ -154,7 +154,8 @@ def fetch_fixtures(known, alias, horizon_days=2, leagues=None):
             return None
 
         for e in r.get("events", []):
-            if e.get("status", {}).get("type", {}).get("completed"):
+            # "pre" only. completed=False includes matches currently being played.
+            if e.get("status", {}).get("type", {}).get("state") != "pre":
                 continue
             c = e["competitions"][0]
             t = {x["homeAway"]: x["team"] for x in c.get("competitors", [])}
