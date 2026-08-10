@@ -1,7 +1,7 @@
 id,date,league,home,away,p_home,p_elo,boarded,model,result
-Brasileirao|2026-08-09|Bragantino|Corinthians,2026-08-09,Brasileirao,Bragantino,Corinthians,0.6421614548685087,0.6174234207144493,1,v1,
-Brasileirao|2026-08-09|Palmeiras|Internacional,2026-08-09,Brasileirao,Palmeiras,Internacional,0.8639806308207783,0.8072136527581957,1,v1,
-Brasileirao|2026-08-09|Santos|Athletico-PR,2026-08-09,Brasileirao,Santos,Athletico-PR,0.5594827003047634,0.5955745379479029,1,v1,
-Brasileirao|2026-08-09|Cruzeiro|Mirassol,2026-08-09,Brasileirao,Cruzeiro,Mirassol,0.7079134322651449,0.6909195788200405,1,v1,
-Brasileirao|2026-08-09|Bahia|Vasco,2026-08-09,Brasileirao,Bahia,Vasco,0.7680758097081581,0.7123662068370065,1,v1,
-Brasileirao|2026-08-09|Flamengo RJ|Vitoria,2026-08-09,Brasileirao,Flamengo RJ,Vitoria,0.8692169635545319,0.7837084577918649,1,v1,
+Brasileirao|2026-08-09|Bragantino|Corinthians,2026-08-09,Brasileirao,Bragantino,Corinthians,0.6421614548685087,0.6174234207144493,1,v1,0.0
+Brasileirao|2026-08-09|Palmeiras|Internacional,2026-08-09,Brasileirao,Palmeiras,Internacional,0.8639806308207783,0.8072136527581957,1,v1,-1.0
+Brasileirao|2026-08-09|Santos|Athletico-PR,2026-08-09,Brasileirao,Santos,Athletico-PR,0.5594827003047634,0.5955745379479029,1,v1,0.0
+Brasileirao|2026-08-09|Cruzeiro|Mirassol,2026-08-09,Brasileirao,Cruzeiro,Mirassol,0.7079134322651449,0.6909195788200405,1,v1,1.0
+Brasileirao|2026-08-09|Bahia|Vasco,2026-08-09,Brasileirao,Bahia,Vasco,0.7680758097081581,0.7123662068370065,1,v1,-1.0
+Brasileirao|2026-08-09|Flamengo RJ|Vitoria,2026-08-09,Brasileirao,Flamengo RJ,Vitoria,0.8692169635545319,0.7837084577918649,1,v1,1.0
