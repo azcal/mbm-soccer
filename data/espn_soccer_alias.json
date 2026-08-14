@@ -1,5 +1,5 @@
 {
- "_comment": "ESPN displayName -> football-data club name, scoped per league because 'Santos' is a Brasileirao club while 'Santos Laguna' is a Liga MX one, and a flat map would bridge them. Only needed where norm_team does not already match; it handles accents, hyphenated state codes and club-type words unaided, covering 7 of 8 Brasileirao and 3 of 4 Liga MX clubs on live feeds. Entries are only proposed where a qualifier can be dropped without ambiguity: 'Atletico' is refused because both Atletico-MG and Atletico GO exist. The runner prints any unmatched fixture by name; add it under its league and rerun.",
+ "_comment": "ESPN displayName -> football-data club name, scoped per league because 'Santos' is a Brasileirao club while 'Santos Laguna' is a Liga MX one, and a flat map would bridge them. Only needed where norm_team does not already match; it handles accents, hyphenated state codes and club-type words unaided. Two classes of entry: a qualifier dropped without ambiguity ('America' -> 'America MG'), and a word-order or abbreviation difference the normaliser cannot bridge ('Pumas UNAM' -> 'UNAM Pumas', 'LA Galaxy' -> 'Los Angeles Galaxy'). Entries are refused where a qualifier is ambiguous: 'Atletico' is not mapped because both Atletico-MG and Atletico GO exist. The runner prints any unmatched fixture; add it under its league and rerun.",
  "Brasileirao": {
   "America": "America MG",
   "Athletico": "Athletico-PR",
@@ -7,9 +7,15 @@
   "Flamengo": "Flamengo RJ"
  },
  "LigaMX": {
-  "Santos": "Santos Laguna"
+  "Santos": "Santos Laguna",
+  "Guadalajara": "Guadalajara Chivas",
+  "Pumas UNAM": "UNAM Pumas"
  },
  "MLS": {
-  "Chivas": "Chivas USA"
+  "Chivas": "Chivas USA",
+  "LA Galaxy": "Los Angeles Galaxy",
+  "LAFC": "Los Angeles FC",
+  "Red Bull New York": "New York Red Bulls",
+  "Atlanta United FC": "Atlanta Utd"
  }
 }
