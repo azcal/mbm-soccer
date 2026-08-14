@@ -1,13 +1,16 @@
 """
 MBM Big-5 soccer DNB daily runner (rebuild v1, frozen spec).
+
 - Refreshes current-season results from football-data.co.uk (tolerates preseason 404s)
-- Ingests upcoming Big-5 fixtures (2-day horizon), predicts P(home | no draw)
+- Ingests upcoming Big-5 fixtures (7-day horizon), predicts P(home | no draw)
 - Discord push routed through tg_delta so refreshes only report what moved
 - Grades logged predictions (draws = push), rolling metrics + last-300 tripwire
+
 Train window frozen through 2025-26; 2026-27 is the forward test.
 Usage: python daily_soccer.py   (env TEST_FIXTURES=path.csv to inject a test slate)
 """
 import io, json, os, sys, datetime as dt
+
 import numpy as np, pandas as pd, requests
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
@@ -52,9 +55,15 @@ TRAIN_THROUGH = "2526"
 MARKET_TAG = SPEC.get("market_tag", "DNB")
 
 # Fixtures are published weeks out, so the horizon controls repetition rather than
-# coverage: at four days a Saturday match posts on four consecutive daily boards. Two
-# keeps a weekend slate on the Friday and Saturday boards and no earlier.
-HORIZON_DAYS = SPEC.get("horizon_days", 2)
+# coverage. Seven days, matching daily_nfl and daily_ncaaf: a Tuesday run reaches the
+# following Monday, so a whole weekend slate is on the board from the start of the week
+# rather than appearing on the Friday. Repetition is not the cost it looks like -- the
+# delta gate suppresses a row that has not moved, so a fixture posts once and then only
+# when its price changes.
+#
+# The old value was 2, which on 2026-08-14 would have caught 4 of the 5 upcoming Big 5
+# fixtures and missed a Sunday match entirely.
+HORIZON_DAYS = SPEC.get("horizon_days", 7)
 
 # The Americas boards. Big 5 above is untouched by all of this: separate spec, separate
 # feature set, separate frozen holdout. See soccer_americas.py for why they are not pooled.
@@ -63,6 +72,7 @@ NEW_BOARD = set(NEW.get("board", []))        # Brasileirao, LigaMX
 NEW_RETIRED = set(NEW.get("retired", []))    # MLS: predicted and graded, never pushed
 NEW_MATCHES = os.path.join(HERE, "data", "americas_matches.csv")
 NEW_ALIAS = os.path.join(HERE, "data", "espn_soccer_alias.json")
+
 # Country codes throughout, so every soccer row names its competition. BRA and MEX were
 # already country codes, so the Big 5 follow the same convention rather than a mix of
 # country codes and league abbreviations.
@@ -81,6 +91,7 @@ LG_ORDER = ["EPL", "LaLiga", "SerieA", "Bundesliga", "Ligue1",
 # quoted different prices for the same game.
 MIN_EDGE = BF.MIN_EDGE
 
+
 def min_odds(p):
     import math
     p = min(max(float(p), 0.01), 0.99)
@@ -91,11 +102,13 @@ def season_code(d):
     y = d.year % 100
     return f"{y:02d}{y+1:02d}" if d.month >= 7 else f"{y-1:02d}{y:02d}"
 
+
 def extend_seasons(code):
     while code not in E.SEASONS:
         last = E.SEASONS[-1]
         a = int(last[:2]) + 1
         E.SEASONS.append(f"{a:02d}{a+1:02d}")
+
 
 def refresh_results():
     m = pd.read_csv(MATCHES, parse_dates=["date"])
@@ -127,24 +140,55 @@ def refresh_results():
         print("no current-season results yet (preseason)")
     return m
 
+
 def fetch_fixtures(horizon_days=HORIZON_DAYS):
+    """Upcoming Big 5 fixtures. Returns (frame, feed_ok).
+
+    feed_ok is False when the pull failed or came back in a shape we could not read, so the
+    caller can tell an outage from a genuinely empty week. This function used to return a
+    bare empty frame in both cases and the board printed "no upcoming fixtures", which is
+    exactly incident 3.
+
+    That was not hypothetical. Measured 2026-08-14: requests decodes fixtures.csv as
+    ISO-8859-1, so the UTF-8 byte-order mark arrives as the three characters "i>>?" rather
+    than one \ufeff. `lstrip("\ufeff")` could not match it, the first column stayed
+    "<BOM>Div", the `"Div" not in d.columns` test fired, and 127 fixtures -- including four
+    La Liga matches on the opening weekend -- became zero with nothing printed. Forcing
+    utf-8-sig makes requests strip the BOM itself.
+    """
     tf = os.environ.get("TEST_FIXTURES")
     if tf and os.path.exists(tf):
         d = pd.read_csv(tf)
     else:
-        r = requests.get("https://www.football-data.co.uk/fixtures.csv", headers=H, timeout=60)
-        d = pd.read_csv(io.StringIO(r.text.lstrip("\ufeff")), on_bad_lines="skip",
-                        encoding_errors="ignore") if r.status_code == 200 else pd.DataFrame()
-    if d.empty or "Div" not in d.columns:
-        return pd.DataFrame()
+        try:
+            r = requests.get("https://www.football-data.co.uk/fixtures.csv",
+                             headers=H, timeout=60)
+            r.raise_for_status()
+            # Not lstrip: the BOM may already have been mangled by the decode. Naming the
+            # encoding makes requests handle it before we ever see the text.
+            r.encoding = "utf-8-sig"
+            d = pd.read_csv(io.StringIO(r.text), on_bad_lines="skip",
+                            encoding_errors="ignore")
+        except Exception as ex:
+            print(f"Big 5 fixture feed unavailable: {type(ex).__name__}")
+            return pd.DataFrame(), False
+    # A readable file with no Div column is a shape change, not an empty week. Say so.
+    d.columns = [str(c).strip().lstrip("\ufeff") for c in d.columns]
+    if "Div" not in d.columns:
+        print(f"Big 5 fixture feed has no Div column, got {list(d.columns)[:6]} -- "
+              f"the file's shape changed, this is not an empty slate")
+        return pd.DataFrame(), False
+    if d.empty:
+        return pd.DataFrame(), True
     d = d[d.Div.isin(DIVS)].copy()
     if d.empty:
-        return d
+        return d, True
     d["league"] = d.Div.map(DIVS)
     d["date"] = pd.to_datetime(d.Date, format="mixed", dayfirst=True)
     today = pd.Timestamp(dt.date.today())
     d = d[(d.date >= today) & (d.date <= today + pd.Timedelta(days=horizon_days))]
-    return d[["league", "date", "HomeTeam", "AwayTeam"]]
+    return d[["league", "date", "HomeTeam", "AwayTeam"]], True
+
 
 def run_americas(chk):
     """Board Brasileirao and LigaMX; predict, log and grade MLS without pushing it.
@@ -202,7 +246,6 @@ def run_americas(chk):
             season=[AM.season_of(r.league, r.date, store) for r in fx.itertuples()],
             FTHG=np.nan, FTAG=np.nan, HS=np.nan, AS=np.nan, HST=np.nan, AST=np.nan)
     print(f"  americas fixtures in {HORIZON_DAYS}d: {len(fx)}")
-
     f = AM.build_features(store, fx, cfg, E)
     tr = (f.date < pd.Timestamp("2026-01-01")) & (f.date >= pd.Timestamp("2014-01-01")) \
          & f.hg.notna() & (~f.draw)
@@ -210,12 +253,10 @@ def run_americas(chk):
     mdl = LogisticRegression(C=C_, max_iter=2000).fit(
         sc.transform(f.loc[tr, AM.FEATS].values), f.loc[tr, "y"].values)
     base = float(f.loc[tr, "y"].mean())
-
     pred_path = os.path.join(LOGS, "americas_predictions.csv")
     log = pd.read_csv(pred_path) if os.path.exists(pred_path) else pd.DataFrame(
         columns=["id", "date", "league", "home", "away", "p_home", "p_elo",
                  "boarded", "model"])
-
     rows = []
     up = f[f.hg.isna()]
     if len(up):
@@ -254,7 +295,6 @@ def run_americas(chk):
                              np.where(j[0] == j[1], -1.0, (j[0] > j[1]).astype(float)))
     os.makedirs(LOGS, exist_ok=True)
     log.to_csv(pred_path, index=False)
-
     alerts = []
     dec = log[log.result.isin([0.0, 1.0])]
     if len(dec) >= 50:
@@ -287,7 +327,12 @@ def run_americas(chk):
 def run():
     chk = CHK.Reporter("Soccer", dt.date.today().strftime("%Y%m%d"))
     m = refresh_results()
-    fx = fetch_fixtures()
+    fx, _fx_ok = fetch_fixtures()
+    print(f"Big 5 fixtures in {HORIZON_DAYS}d: {len(fx)}")
+    # WARN not FAIL: a fixture-feed outage means no Big 5 board this run, but it must not
+    # kill the Americas board or the grading, both of which are independent of this feed.
+    chk.no_silent_empty("big5_fixtures", is_empty=(len(fx) == 0),
+                        call_failed=not _fx_ok, warn_only=True)
     pseudo = []
     for r in fx.itertuples():
         pseudo.append(dict(Date=r.date.strftime("%d/%m/%Y"), HomeTeam=r.HomeTeam,
@@ -335,13 +380,11 @@ def run():
     mdl = LogisticRegression(C=C, max_iter=2000).fit(
         sc.transform(f.loc[tr, E.FEATS].values), f.loc[tr, "y"].values)
     base = float(f.loc[tr, "y"].mean())
-
     alerts = []
     os.makedirs(LOGS, exist_ok=True)
     pred_path = os.path.join(LOGS, "predictions.csv")
     log = pd.read_csv(pred_path) if os.path.exists(pred_path) else \
         pd.DataFrame(columns=["id", "date", "league", "home", "away", "p_home", "p_elo", "model"])
-
     if pseudo:
         rows = f[f.hg.isna()].copy()
         p = mdl.predict_proba(sc.transform(rows[E.FEATS].values))[:, 1]
@@ -357,9 +400,9 @@ def run():
         log = pd.concat([log[~log.id.isin(b.id)], b], ignore_index=True)
     else:
         print("no upcoming Big-5 fixtures in horizon")
-
     res = m.assign(id=m.league + "|" + m.date.dt.strftime("%Y-%m-%d") + "|" + m.HomeTeam + "|" + m.AwayTeam)
     exact = res.set_index("id")[["FTHG", "FTAG"]]
+
     def grade(row):
         if row.id in exact.index:
             hg, ag = exact.loc[row.id]
@@ -370,6 +413,7 @@ def run():
                 return np.nan
             hg, ag = c.iloc[0][["FTHG", "FTAG"]]
         return -1.0 if hg == ag else float(hg > ag)
+
     log["result"] = log.apply(grade, axis=1)
     log.to_csv(pred_path, index=False)
     dec = log[log.result.isin([0.0, 1.0])]
@@ -424,14 +468,12 @@ def run():
                          # even when the price barely moves. The id already pins the
                          # fixture, so the matchup itself cannot change under it.
                          "match": pk}
-
     print("\n=== MBM Soccer DNB board ===")
     for _v in push.values():
         print(_v["line"])
     if skipped:
         print(f"({skipped} fixture{'s' if skipped != 1 else ''} skipped, "
               f"price floor {BF.PRICE_FLOOR:.2f} / {BF.american(BF.PRICE_FLOOR)})")
-
     # Keyed, so whatever survives the gate can be regrouped under its league. On a delta
     # push only some fixtures go out, so headings must be built from what was actually
     # sent rather than from the full board.
