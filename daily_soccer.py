@@ -142,6 +142,16 @@ def refresh_results():
                              headers=H, timeout=60)
             if r.status_code != 200 or len(r.text) < 200:
                 continue
+            # A 301 to a different filename means the file we asked for does not exist and
+            # Apache's MultiViews picked the nearest name it could find. Measured
+            # 2026-08-16: 2627/E0.csv -> 2627/EC.csv (National League) and 2627/SP1.csv ->
+            # 2627/P1.csv (Primeira Liga), both HTTP 200 after the redirect. Catching it
+            # here says exactly what happened; the Div check below is the backstop for a
+            # substituted file that happens to carry a plausible division.
+            if r.url.rsplit("/", 1)[-1] != f"{div}.csv":
+                wrong.append(f"{div}.csv does not exist, the server redirected to "
+                             f"{r.url.rsplit('/', 1)[-1]}")
+                continue
             r.encoding = "utf-8-sig"     # same BOM trap as fixtures.csv
             d = pd.read_csv(io.StringIO(r.text), on_bad_lines="skip",
                             encoding_errors="ignore")
@@ -405,12 +415,29 @@ def run():
         _m, _, _probe_failed = FR.missed_games(_sl, _nw, season_types=None)
         _worst = max(_worst, abs(_m))
         _entries.append((_lg, _nw, _sl))
+    # Stale Big 5 suppresses the BIG 5 BOARD, it does not kill the run. run_americas is
+    # already wrapped in try/except so a broken Americas board cannot take Big 5 down; this
+    # is the same protection in the other direction, and it was missing.
+    #
+    # It matters right now rather than hypothetically: football-data has published no
+    # 2026-27 Big 5 file for any of the five leagues, so this check will fail on every run
+    # until they do, possibly for weeks. Raising here would take Brasileirao and Liga MX
+    # off Discord the whole time, and those two are healthy and had 14 boardable fixtures
+    # on the last good run.
+    #
+    # The guard still does its real job: no Big 5 price is published on stale data. It just
+    # stops a sourceless board holding a working one hostage.
+    BIG5_OK, BIG5_WHY = True, None
     if _entries:
         _ok, _lines = FR.check_multi(_entries, season_types=None, grace_days=14, reporter=chk)
         for _l in _lines:
             print(_l)
         if not _ok and not FR.override():
-            raise SystemExit("Soccer: refusing to board on stale data")
+            BIG5_OK = False
+            _bad = [e[0] for e, m in zip(_entries, _lines) if "STALE" in m or "UNVERIFIED" in m]
+            BIG5_WHY = ("Big 5 withheld: " + ", ".join(_bad or ["stale"])
+                        + " not current. Americas below is unaffected.")
+            print(f"  {BIG5_WHY}")
         _newest = max(e[1] for e in _entries)
         FRESH_LINE = FR.board_line(_newest, checked=(_newest, _worst))
     else:
@@ -429,7 +456,7 @@ def run():
     pred_path = os.path.join(LOGS, "predictions.csv")
     log = pd.read_csv(pred_path) if os.path.exists(pred_path) else \
         pd.DataFrame(columns=["id", "date", "league", "home", "away", "p_home", "p_elo", "model"])
-    if pseudo:
+    if pseudo and BIG5_OK:
         rows = f[f.hg.isna()].copy()
         p = mdl.predict_proba(sc.transform(rows[E.FEATS].values))[:, 1]
         p = E.shrink(p, rows.min_gp.values, A0)
@@ -442,6 +469,8 @@ def run():
                           "league": rows.league, "home": rows.home, "away": rows.away,
                           "p_home": p, "p_elo": pe.values, "model": "v1"})
         log = pd.concat([log[~log.id.isin(b.id)], b], ignore_index=True)
+    elif pseudo:
+        print("Big 5 fixtures present but the board is suppressed on stale data")
     else:
         print("no upcoming Big-5 fixtures in horizon")
     res = m.assign(id=m.league + "|" + m.date.dt.strftime("%Y-%m-%d") + "|" + m.HomeTeam + "|" + m.AwayTeam)
@@ -492,7 +521,7 @@ def run():
     # Both boards go through one width pass and one delta gate, so the two share a column
     # layout and a single push cache rather than drifting apart.
     entries = []
-    if pseudo:
+    if pseudo and BIG5_OK:
         entries += [(r.date, f"{r.home} vs {r.away}",
                      f"{r.home if r.p_home >= .5 else r.away} {MARKET_TAG}",
                      max(r.p_home, 1 - r.p_home), r.id) for _, r in b.iterrows()]
@@ -535,7 +564,7 @@ def run():
             lines.append("")
         lines.append(f"__{LG_NAME.get(_lg, _lg)}__")
         lines.extend(by_lg[_lg])
-    if lines or alerts:
+    if lines or alerts or BIG5_WHY:
         body = list(lines) if lines else ["no price changes since the last push"]
         foot = (f"{skipped} fixture{'s' if skipped != 1 else ''} skipped, "
                 f"price floor {BF.PRICE_FLOOR:.2f} / {BF.american(BF.PRICE_FLOOR)}")\
@@ -551,8 +580,12 @@ def run():
         # the data was current; the row says so.
         # Each board's own provenance. A run that publishes only the Americas must not
         # carry a Big 5 freshness line, and vice versa.
+        if BIG5_WHY:
+            # Posted, not just logged. A board that silently stops looks exactly like a
+            # quiet week, and this one will be down for as long as the source is missing.
+            body = body + ["", BIG5_WHY]
         _fresh = []
-        if pseudo and FRESH_LINE:
+        if pseudo and BIG5_OK and FRESH_LINE:
             _fresh.append("Big 5 " + FRESH_LINE)
         if new_rows and AM_FRESH:
             _fresh.append("Americas " + AM_FRESH)
