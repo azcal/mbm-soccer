@@ -10,7 +10,7 @@
  "C": 0.05,
  "a0": 1.0,
  "market_tag": "DNB",
- "horizon_days": 2,
+ "horizon_days": 7,
  "new_leagues": {
   "cfg": {
    "K": 16,

@@ -111,23 +111,67 @@ def extend_seasons(code):
 
 
 def refresh_results():
+    """Pull this season's results, trusting the FILE's own Div column rather than the URL.
+
+    Measured 2026-08-16: mmz4281/2627/E0.csv returned HTTP 200 carrying National League
+    matches (Div "EC": Altrincham, Boreham Wood) and 2627/SP1.csv returned Primeira Liga
+    (Div "P1": Benfica, Estoril). Both cleared the old status-and-length gate, and because
+    the runner labelled every row with the league it ASKED for, Altrincham went into the
+    store as EPL and Benfica as La Liga -- feeding the Elo, the form decays and every
+    price. Nothing said a word; the only symptom was a suspiciously small "+21 rows".
+
+    So: read the Div column and keep only rows carrying the division actually requested. A
+    file serving the wrong league now contributes nothing and says so. That also covers the
+    HTTP 300 multiple-choice pages football-data returns for a season file that does not
+    exist yet (I1, D1, F1 today) -- the old length gate caught those by luck, and a
+    slightly longer redirect page would have sailed through.
+
+    Discarding rather than raising is deliberate: the league simply does not update, and if
+    matches were played the freshness guard catches it downstream. A source serving the
+    wrong data must not be able to poison the store, and must not be able to take the whole
+    board down either.
+    """
     m = pd.read_csv(MATCHES, parse_dates=["date"])
     m["season"] = m.season.astype(str).str.zfill(4)
     cur = season_code(dt.date.today())
     extend_seasons(cur)
-    new = []
+    new, wrong = [], []
     for div, lg in DIVS.items():
-        r = requests.get(f"https://www.football-data.co.uk/mmz4281/{cur}/{div}.csv",
-                         headers=H, timeout=60)
-        if r.status_code != 200 or len(r.text) < 200:
+        try:
+            r = requests.get(f"https://www.football-data.co.uk/mmz4281/{cur}/{div}.csv",
+                             headers=H, timeout=60)
+            if r.status_code != 200 or len(r.text) < 200:
+                continue
+            r.encoding = "utf-8-sig"     # same BOM trap as fixtures.csv
+            d = pd.read_csv(io.StringIO(r.text), on_bad_lines="skip",
+                            encoding_errors="ignore")
+        except Exception as ex:
+            print(f"  {lg}: results feed unavailable ({type(ex).__name__})")
             continue
-        d = pd.read_csv(io.StringIO(r.text), on_bad_lines="skip", encoding_errors="ignore")
+        d.columns = [str(c).strip().lstrip("\ufeff") for c in d.columns]
+        if "Div" not in d.columns:
+            wrong.append(f"{div}.csv has no Div column, got {list(d.columns)[:5]}")
+            continue
+        served = sorted(set(d.Div.dropna().astype(str)))
+        d = d[d.Div.astype(str) == div]
+        if not len(d):
+            wrong.append(f"asked {div} ({lg}), file contains {served}")
+            continue
+        if served != [div]:
+            print(f"  {lg}: {div}.csv also contained {[x for x in served if x != div]}, "
+                  f"those rows dropped")
         keep = [c for c in ("Date", "Time", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "FTR",
                             "HS", "AS", "HST", "AST") if c in d.columns]
         d = d[keep].dropna(subset=["HomeTeam", "AwayTeam", "FTHG", "FTAG"])
         d["league"] = lg
         d["season"] = cur
         new.append(d)
+    if wrong:
+        print("SOURCE MISMATCH, these leagues contributed nothing this run:")
+        for w in wrong:
+            print(f"  {w}")
+        print("  (football-data is serving another division at that URL. Rows were "
+              "discarded rather than filed under the wrong league.)")
     if new:
         n = pd.concat(new, ignore_index=True)
         n["date"] = pd.to_datetime(n.Date, format="mixed", dayfirst=True)
