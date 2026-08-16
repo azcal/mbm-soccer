@@ -260,7 +260,7 @@ def run_americas(chk):
     store = AM.refresh_results(NEW_MATCHES)
     if store is None or not len(store):
         print("  americas: no results store, skipping")
-        return [], [], None
+        return [], [], None, "Americas withheld: no results store."
     store["date"] = pd.to_datetime(store.date)
     alias = AM.load_alias(NEW_ALIAS)
     # football-data publishes a couple of times a week, so fill the tail from ESPN before
@@ -286,12 +286,20 @@ def run_americas(chk):
         am_newest = _nw if am_newest is None else max(am_newest, _nw)
         am_entries.append((_lg, _nw, am_slug[_lg]))
     if am_entries:
-        _ok, _lines = FR.check_multi(am_entries, season_types=None, grace_days=14, reporter=chk)
+        # No reporter= here. check_multi registers a FAIL on stale, and finish(strict=True)
+        # raises on any FAIL -- which would abort the run AFTER the board was built and
+        # BEFORE it posted. One board's source outage must not silence the other, and that
+        # is true in both directions. The single registration below records that the guards
+        # ran; see the note there.
+        _ok, _lines = FR.check_multi(am_entries, season_types=None, grace_days=14)
         for _l in _lines:
             print("  " + _l)
         if not _ok and not FR.override():
-            print("  americas: stale, not boarding these leagues")
-            return [], [], None
+            _bad = [e[0] for e, _m in zip(am_entries, _lines)
+                    if "STALE" in _m or "UNVERIFIED" in _m]
+            _why = ("Americas withheld: " + ", ".join(_bad or ["stale"]) + " not current.")
+            print(f"  {_why}")
+            return [], [], None, _why
     AM_FRESH = FR.board_line(am_newest, checked=(am_newest, am_worst)) if am_newest else None
 
     fx = AM.fetch_fixtures(known, alias, HORIZON_DAYS)
@@ -375,7 +383,7 @@ def run_americas(chk):
             if edge <= 0:
                 alerts.append("Americas DNB")
         dec.to_csv(os.path.join(LOGS, "americas_graded.csv"), index=False)
-    return rows, alerts, AM_FRESH
+    return rows, alerts, AM_FRESH, None
 
 
 def run():
@@ -429,7 +437,7 @@ def run():
     # stops a sourceless board holding a working one hostage.
     BIG5_OK, BIG5_WHY = True, None
     if _entries:
-        _ok, _lines = FR.check_multi(_entries, season_types=None, grace_days=14, reporter=chk)
+        _ok, _lines = FR.check_multi(_entries, season_types=None, grace_days=14)
         for _l in _lines:
             print(_l)
         if not _ok and not FR.override():
@@ -509,13 +517,25 @@ def run():
         dec.to_csv(os.path.join(LOGS, "graded.csv"), index=False)
 
     # ---------------------------------------------------------------- Americas
-    new_rows, new_alerts, AM_FRESH = [], [], None
+    new_rows, new_alerts, AM_FRESH, AM_WHY = [], [], None, None
     if NEW:
         try:
-            new_rows, new_alerts, AM_FRESH = run_americas(chk)
+            new_rows, new_alerts, AM_FRESH, AM_WHY = run_americas(chk)
         except Exception as ex:
             # Never let a second board take the first one down with it.
             print(f"americas board failed: {type(ex).__name__}: {ex}")
+            AM_WHY = f"Americas withheld: the board errored ({type(ex).__name__})."
+
+    # One registration for both boards, after both have been evaluated. register_guard is
+    # what require("freshness") trusts, and both guards genuinely ran -- the difference is
+    # that a stale verdict here suppresses that board rather than aborting the run, so it
+    # is not a check FAILURE. The invariant this asserts is the one that matters: no stale
+    # price reached Discord. A withheld board is that invariant HOLDING, and the reason is
+    # posted to the channel below rather than buried.
+    _held = [x for x in (BIG5_WHY, AM_WHY) if x]
+    chk.register_guard("freshness", True,
+                       "; ".join(_held) if _held else "all boards current, nothing withheld",
+                       "unverified" if _held else "fresh")
     alerts = alerts + new_alerts
 
     # Both boards go through one width pass and one delta gate, so the two share a column
@@ -564,7 +584,7 @@ def run():
             lines.append("")
         lines.append(f"__{LG_NAME.get(_lg, _lg)}__")
         lines.extend(by_lg[_lg])
-    if lines or alerts or BIG5_WHY:
+    if lines or alerts or BIG5_WHY or AM_WHY:
         body = list(lines) if lines else ["no price changes since the last push"]
         foot = (f"{skipped} fixture{'s' if skipped != 1 else ''} skipped, "
                 f"price floor {BF.PRICE_FLOOR:.2f} / {BF.american(BF.PRICE_FLOOR)}")\
@@ -580,10 +600,11 @@ def run():
         # the data was current; the row says so.
         # Each board's own provenance. A run that publishes only the Americas must not
         # carry a Big 5 freshness line, and vice versa.
-        if BIG5_WHY:
-            # Posted, not just logged. A board that silently stops looks exactly like a
-            # quiet week, and this one will be down for as long as the source is missing.
-            body = body + ["", BIG5_WHY]
+        # Posted, not just logged. A board that silently stops looks exactly like a quiet
+        # week, and Big 5 will be down for as long as its source has no 2026-27 files.
+        for _w in (BIG5_WHY, AM_WHY):
+            if _w:
+                body = body + ["", _w]
         _fresh = []
         if pseudo and BIG5_OK and FRESH_LINE:
             _fresh.append("Big 5 " + FRESH_LINE)
