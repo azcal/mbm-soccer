@@ -31,6 +31,8 @@ import json
 import os
 import time
 
+import unicodedata
+
 import numpy as np
 import pandas as pd
 import requests
@@ -45,11 +47,51 @@ SLUG = {"EPL": "eng.1", "LaLiga": "esp.1", "SerieA": "ita.1",
 
 
 def load_alias(path):
-    try:
-        return {k: v for k, v in json.load(open(path, encoding="utf-8")).items()
-                if not k.startswith("_")}
-    except Exception:
+    """Load the club-name map, and SAY SO if it cannot be loaded.
+
+    The first version swallowed every exception and returned {}, so a missing or misplaced
+    file looked exactly like a file with no entries -- and the backfill then skipped every
+    fixture on names the alias explicitly contained, reporting them as unmatched. That is
+    the silent-empty pattern, inside the module written to close a silent-empty. It cost a
+    full run to diagnose and would have cost more if the skipped names had been less
+    obviously wrong.
+    """
+    if not os.path.exists(path):
+        print(f"  big5 alias NOT FOUND at {path} -- every club name will be matched raw, "
+              f"so anything ESPN spells differently will be skipped")
         return {}
+    try:
+        raw = json.load(open(path, encoding="utf-8"))
+    except Exception as ex:
+        print(f"  big5 alias at {path} could not be read ({type(ex).__name__}: {ex})")
+        return {}
+    a = {k: v for k, v in raw.items() if not k.startswith("_")}
+    print(f"  big5 alias loaded: {sum(len(v) for v in a.values())} entries across "
+          f"{len(a)} league(s)")
+    return a
+
+
+def _fold(s):
+    """Accent-folded, case-folded club name.
+
+    Deterministic, not fuzzy: it strips combining marks and lowercases, nothing else.
+    Verified 2026-08-16 that no two clubs in any Big 5 store fold together, so a fold match
+    is exact rather than a guess. This is what lets the alias carry only genuine name
+    differences (Man City, Nott'm Forest) instead of also carrying every accent, and it
+    means a missing alias file degrades to "accents still work" rather than to nothing.
+    """
+    s = unicodedata.normalize("NFKD", str(s))
+    return "".join(c for c in s if not unicodedata.combining(c)).strip().lower()
+
+
+def _resolve(name, amap, known, folded):
+    """Store name for an ESPN club, or None. Exact, then alias, then accent fold."""
+    if name in known:
+        return name
+    mapped = amap.get(name)
+    if mapped and mapped in known:
+        return mapped
+    return folded.get(_fold(mapped or name))
 
 
 def _stat(team, name):
@@ -76,6 +118,7 @@ def fetch(league, since, until=None, known=None, alias=None, timeout=45, pause=0
         return pd.DataFrame(), []
     amap = (alias or {}).get(league, {})
     known = known or set()
+    folded = {_fold(k): k for k in known}
     rng = f"{start:%Y%m%d}-{until:%Y%m%d}"
     try:
         r = requests.get(f"{ESPN}/{SLUG[league]}/scoreboard", headers=H, timeout=timeout,
@@ -94,14 +137,12 @@ def fetch(league, since, until=None, known=None, alias=None, timeout=45, pause=0
             sides = {x.get("homeAway"): x for x in c.get("competitors", [])}
             if "home" not in sides or "away" not in sides:
                 continue
-            hn = amap.get(sides["home"]["team"].get("displayName", ""),
-                          sides["home"]["team"].get("displayName", ""))
-            an = amap.get(sides["away"]["team"].get("displayName", ""),
-                          sides["away"]["team"].get("displayName", ""))
-            if hn not in known or an not in known:
-                bad = [n for n in (hn, an) if n not in known]
-                skipped.append(f"{league}: no match for {bad} "
-                               f"(in {an} @ {hn})")
+            rawh = sides["home"]["team"].get("displayName", "")
+            rawa = sides["away"]["team"].get("displayName", "")
+            hn, an = _resolve(rawh, amap, known, folded), _resolve(rawa, amap, known, folded)
+            if hn is None or an is None:
+                bad = [r for r, v in ((rawh, hn), (rawa, an)) if v is None]
+                skipped.append(f"{league}: no match for {bad} (in {rawa} @ {rawh})")
                 continue
             try:
                 hg, ag = float(sides["home"]["score"]), float(sides["away"]["score"])
