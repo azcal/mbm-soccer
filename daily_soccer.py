@@ -23,6 +23,7 @@ import board_format as BF
 import notify
 import engine as E
 import soccer_americas as AM
+import big5_espn as B5
 import freshness as FR
 import mbm_checks as CHK
 
@@ -33,7 +34,7 @@ import mbm_checks as CHK
 #               and a matchup string to 35, so without it the widest row on every board
 #               renders as an unstyled run-on line.
 SHARED_MIN = "2026-08-03"
-for _mod in (BF, notify, tg_delta, AM, FR, CHK):
+for _mod in (BF, notify, tg_delta, AM, B5, FR, CHK):
     _have = getattr(_mod, "VERSION", "")
     if _have < SHARED_MIN:
         raise ImportError(
@@ -72,6 +73,7 @@ NEW_BOARD = set(NEW.get("board", []))        # Brasileirao, LigaMX
 NEW_RETIRED = set(NEW.get("retired", []))    # MLS: predicted and graded, never pushed
 NEW_MATCHES = os.path.join(HERE, "data", "americas_matches.csv")
 NEW_ALIAS = os.path.join(HERE, "data", "espn_soccer_alias.json")
+BIG5_ALIAS = os.path.join(HERE, "data", "big5_alias.json")
 
 # Country codes throughout, so every soccer row names its competition. BRA and MEX were
 # already country codes, so the Big 5 follow the same convention rather than a mix of
@@ -188,10 +190,22 @@ def refresh_results():
         key = lambda x: x.league + "|" + x.date.dt.strftime("%Y-%m-%d") + "|" + x.HomeTeam + "|" + x.AwayTeam
         m = m[~key(m).isin(set(key(n)))]
         m = pd.concat([m, n], ignore_index=True).sort_values("date").reset_index(drop=True)
-        m.to_csv(MATCHES, index=False)
         print(f"results refreshed: +{len(n)} rows this season")
     else:
         print("no current-season results yet (preseason)")
+
+    # Fill whatever football-data has not published, from ESPN. Lossless: ESPN carries
+    # totalShots and shotsOnTarget, so HS/AS/HST/AST arrive too and the Big 5 head runs on
+    # the feature set it was trained on. These rows are provisional -- the dedup above
+    # replaces any key football-data later serves, so its version wins when it appears.
+    try:
+        add = B5.backfill(m, DIVS, BIG5_ALIAS, season_code)
+        if len(add):
+            m = pd.concat([m, add], ignore_index=True).sort_values("date").reset_index(drop=True)
+    except Exception as ex:
+        print(f"  Big 5 ESPN backfill failed ({type(ex).__name__}: {ex}), "
+              f"continuing on football-data alone")
+    m.to_csv(MATCHES, index=False)
     return m
 
 
