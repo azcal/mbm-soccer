@@ -1,0 +1,49 @@
+name: cleanup-matches
+# One-off repair for the wrong-league contamination found 2026-08-16: football-data has not
+# published the 2026-27 Big 5 files, and its server 301-redirected E0.csv to EC.csv (National
+# League) and SP1.csv to P1.csv (Primeira Liga). The runner labelled those rows with the
+# league it asked for, so Altrincham went into the store as EPL and Estoril as La Liga.
+#
+# Run it once with clean unticked to see what is in there. Tick clean to remove every
+# season-2627 row and commit; the Div-verified refresh_results then rebuilds whatever is
+# legitimately available, which today is nothing for Big 5.
+on:
+  workflow_dispatch:
+    inputs:
+      clean:
+        description: "Actually delete the season-2627 rows and commit. Leave unticked to inspect only."
+        type: boolean
+        default: false
+permissions:
+  contents: write
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install pandas
+
+      - name: inspect or clean
+        run: |
+          set -e
+          if [ "${{ inputs.clean }}" = "true" ]; then
+            python cleanup_check.py --clean
+          else
+            python cleanup_check.py
+          fi
+
+      - name: commit the cleaned store
+        if: ${{ inputs.clean }}
+        run: |
+          set -e
+          if git diff --quiet -- data/matches.csv; then
+            echo "matches.csv unchanged, nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add data/matches.csv
+          git commit -m "remove season-2627 rows contaminated by wrong-division fetch"
+          git push
