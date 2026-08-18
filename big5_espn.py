@@ -179,6 +179,70 @@ def fetch(league, since, until=None, known=None, alias=None, timeout=45, pause=0
     return pd.DataFrame(rows), skipped
 
 
+def fixtures(m, divs, alias_path, horizon_days, timeout=45):
+    """Upcoming Big 5 fixtures from ESPN, in the shape daily_soccer's pseudo-rows expect.
+
+    football-data's fixtures.csv is a next-48-hours feed: measured 2026-08-18 it carried
+    three rows across two days, so a seven-day horizon bought nothing and EPL -- three days
+    from its opening weekend -- was simply absent. ESPN listed ten EPL fixtures in the same
+    window and twenty within a fortnight.
+
+    Seven days is roughly when books post soccer lines, so a fixture surfaces about when it
+    becomes shoppable rather than the night before.
+
+    Only state == "pre": a match under way or finished must never reach a pre-match board.
+    Club names resolve through the same alias and accent fold as the results backfill, and
+    an unresolved name is skipped and printed rather than guessed.
+    """
+    alias = load_alias(alias_path)
+    today = dt.date.today()
+    rng = f"{today:%Y%m%d}-{today + dt.timedelta(days=horizon_days):%Y%m%d}"
+    out, skipped = [], []
+    for league in divs.values():
+        sub = m[(m.league == league) & m.FTHG.notna()]
+        if not len(sub):
+            continue
+        known = set(sub.HomeTeam) | set(sub.AwayTeam)
+        folded = {_fold(k): k for k in known}
+        amap = alias.get(league, {})
+        try:
+            r = requests.get(f"{ESPN}/{SLUG[league]}/scoreboard", headers=H, timeout=timeout,
+                             params={"dates": rng, "limit": 500})
+            r.raise_for_status()
+            j = r.json()
+        except Exception as ex:
+            print(f"  {league}: ESPN fixtures unavailable ({type(ex).__name__})")
+            continue
+        for e in j.get("events", []):
+            if e.get("status", {}).get("type", {}).get("state") != "pre":
+                continue
+            for c in e.get("competitions", []):
+                sides = {x.get("homeAway"): x for x in c.get("competitors", [])}
+                if "home" not in sides or "away" not in sides:
+                    continue
+                rawh = sides["home"]["team"].get("displayName", "")
+                rawa = sides["away"]["team"].get("displayName", "")
+                hn = _resolve(rawh, amap, known, folded)
+                an = _resolve(rawa, amap, known, folded)
+                if hn is None or an is None:
+                    bad = [x for x, v in ((rawh, hn), (rawa, an)) if v is None]
+                    skipped.append(f"{league}: no match for {bad} (in {rawa} @ {rawh})")
+                    continue
+                out.append({"league": league,
+                            "date": pd.Timestamp(e["date"]).tz_localize(None).normalize(),
+                            "HomeTeam": hn, "AwayTeam": an})
+    if skipped:
+        print(f"  {len(skipped)} Big 5 fixture(s) skipped, club names not matched:")
+        for x in skipped[:6]:
+            print(f"     {x}")
+    if not out:
+        return pd.DataFrame(columns=["league", "date", "HomeTeam", "AwayTeam"])
+    f = pd.DataFrame(out).drop_duplicates(subset=["league", "date", "HomeTeam", "AwayTeam"])
+    print("  Big 5 fixtures from ESPN: "
+          + ", ".join(f"{k} {v}" for k, v in f.league.value_counts().items()))
+    return f
+
+
 def backfill(m, divs, alias_path, season_code_fn):
     """Everything the store is missing across all five leagues.
 

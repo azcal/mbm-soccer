@@ -403,7 +403,21 @@ def run_americas(chk):
 def run():
     chk = CHK.Reporter("Soccer", dt.date.today().strftime("%Y%m%d"))
     m = refresh_results()
+    # ESPN for fixtures, football-data as a supplement. football-data's fixtures.csv is a
+    # next-48-hours feed -- measured 2026-08-18 it held three rows across two days, so EPL
+    # three days from its opening weekend was simply absent while ESPN listed ten. Union of
+    # the two, deduped, so neither source going quiet costs coverage.
     fx, _fx_ok = fetch_fixtures()
+    try:
+        _esp = B5.fixtures(m, DIVS, BIG5_ALIAS, HORIZON_DAYS)
+        if len(_esp):
+            fx = (pd.concat([fx, _esp], ignore_index=True)
+                    .drop_duplicates(subset=["league", "date", "HomeTeam", "AwayTeam"])
+                  if len(fx) else _esp)
+            _fx_ok = True
+    except Exception as ex:
+        print(f"  Big 5 ESPN fixtures failed ({type(ex).__name__}: {ex}), "
+              f"continuing on football-data alone")
     print(f"Big 5 fixtures in {HORIZON_DAYS}d: {len(fx)}")
     # WARN not FAIL: a fixture-feed outage means no Big 5 board this run, but it must not
     # kill the Americas board or the grading, both of which are independent of this feed.
