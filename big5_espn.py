@@ -37,13 +37,53 @@ import numpy as np
 import pandas as pd
 import requests
 
-VERSION = "2026-08-16"
+VERSION = "2026-09-16"
 
 # ESPN 403s any custom User-Agent. See the note in espn_roster.py.
 H = {}
 ESPN = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 SLUG = {"EPL": "eng.1", "LaLiga": "esp.1", "SerieA": "ita.1",
         "Bundesliga": "ger.1", "Ligue1": "fra.1"}
+
+def _scoreboard(league, rng, timeout=45, retries=3):
+    """One scoreboard pull with backoff, and a per-day fallback when the ranged request keeps
+    failing. ESPN throttles GitHub runners now and then (429/5xx); the freshness probe has
+    retried single days since August and kept working through the same hours this fetcher
+    failed. Returns the merged events list, or None when nothing could be fetched."""
+    import time
+    last = None
+    for attempt in range(retries):
+        try:
+            r = requests.get(f"{ESPN}/{SLUG[league]}/scoreboard", headers=H, timeout=timeout,
+                             params={"dates": rng, "limit": 500})
+            if r.status_code == 200:
+                return r.json().get("events", [])
+            last = f"HTTP {r.status_code}"
+        except Exception as ex:
+            last = type(ex).__name__
+        time.sleep(1.5 * (2 ** attempt))
+    # per-day fallback
+    events, ok = [], 0
+    try:
+        a, b = rng.split("-"); d0 = dt.datetime.strptime(a, "%Y%m%d").date(); d1 = dt.datetime.strptime(b, "%Y%m%d").date()
+    except Exception:
+        print(f"  {league}: ESPN unavailable ({last})"); return None
+    day = d0
+    while day <= d1:
+        try:
+            r = requests.get(f"{ESPN}/{SLUG[league]}/scoreboard", headers=H, timeout=timeout,
+                             params={"dates": day.strftime("%Y%m%d")})
+            if r.status_code == 200:
+                events += r.json().get("events", []); ok += 1
+            time.sleep(0.4)
+        except Exception:
+            pass
+        day += dt.timedelta(days=1)
+    if ok == 0:
+        print(f"  {league}: ESPN unavailable ({last}; per-day fallback also failed)"); return None
+    print(f"  {league}: ESPN ranged call failed ({last}); recovered {len(events)} event(s) day by day")
+    return events
+
 
 
 def load_alias(path):
@@ -120,14 +160,10 @@ def fetch(league, since, until=None, known=None, alias=None, timeout=45, pause=0
     known = known or set()
     folded = {_fold(k): k for k in known}
     rng = f"{start:%Y%m%d}-{until:%Y%m%d}"
-    try:
-        r = requests.get(f"{ESPN}/{SLUG[league]}/scoreboard", headers=H, timeout=timeout,
-                         params={"dates": rng, "limit": 500})
-        r.raise_for_status()
-        j = r.json()
-    except Exception as ex:
-        print(f"  {league}: ESPN unavailable ({type(ex).__name__})")
+    _ev = _scoreboard(league, rng, timeout=timeout)
+    if _ev is None:
         return pd.DataFrame(), []
+    j = {"events": _ev}
 
     rows, skipped = [], []
     for e in j.get("events", []):
@@ -205,14 +241,11 @@ def fixtures(m, divs, alias_path, horizon_days, timeout=45):
         known = set(sub.HomeTeam) | set(sub.AwayTeam)
         folded = {_fold(k): k for k in known}
         amap = alias.get(league, {})
-        try:
-            r = requests.get(f"{ESPN}/{SLUG[league]}/scoreboard", headers=H, timeout=timeout,
-                             params={"dates": rng, "limit": 500})
-            r.raise_for_status()
-            j = r.json()
-        except Exception as ex:
-            print(f"  {league}: ESPN fixtures unavailable ({type(ex).__name__})")
+        _ev = _scoreboard(league, rng, timeout=timeout)
+        if _ev is None:
+            print(f"  {league}: ESPN fixtures unavailable")
             continue
+        j = {"events": _ev}
         for e in j.get("events", []):
             if e.get("status", {}).get("type", {}).get("state") != "pre":
                 continue
