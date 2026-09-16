@@ -59,6 +59,8 @@ def _scoreboard(league, rng, timeout=45, retries=3):
             if r.status_code == 200:
                 return r.json().get("events", [])
             last = f"HTTP {r.status_code}"
+            if r.status_code == 400:      # ESPN rejects the ranged form outright now (2026-09-16); don't wait, go day by day
+                break
         except Exception as ex:
             last = type(ex).__name__
         time.sleep(1.5 * (2 ** attempt))
