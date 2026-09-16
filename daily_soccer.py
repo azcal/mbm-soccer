@@ -503,6 +503,12 @@ def run():
         rows = f[f.hg.isna()].copy()
         if BIG5_BAD and "league" in rows.columns:
             rows = rows[~rows.league.isin(BIG5_BAD)].copy()
+        if len(rows) == 0:
+            # every fixture in the horizon belongs to a withheld league (a midweek LaLiga
+            # round, say); treat it like the no-fixtures case rather than pricing nothing
+            print("no boardable Big 5 fixtures after the withhold; nothing to price")
+            pseudo = []
+    if pseudo and BIG5_OK:
         p = mdl.predict_proba(sc.transform(rows[E.FEATS].values))[:, 1]
         p = E.shrink(p, rows.min_gp.values, A0)
         # engine.shrink ramps to full weight at 6 games; say so while it is still ramping.
