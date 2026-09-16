@@ -463,16 +463,23 @@ def run():
     #
     # The guard still does its real job: no Big 5 price is published on stale data. It just
     # stops a sourceless board holding a working one hostage.
-    BIG5_OK, BIG5_WHY = True, None
+    BIG5_OK, BIG5_WHY, BIG5_BAD = True, None, []
     if _entries:
         _ok, _lines = FR.check_multi(_entries, season_types=None, grace_days=14)
         for _l in _lines:
             print(_l)
         if not _ok and not FR.override():
-            BIG5_OK = False
-            _bad = [e[0] for e, m in zip(_entries, _lines) if "STALE" in m or "UNVERIFIED" in m]
-            BIG5_WHY = ("Big 5 withheld: " + ", ".join(_bad or ["stale"])
-                        + " not current. Americas below is unaffected.")
+            # Per-league withhold (2026-09-16). One league's file lagging a Monday or midweek
+            # fixture used to hold all five back. Only the stale league(s) are withheld now;
+            # the guard still publishes no price on stale data.
+            BIG5_BAD = [e[0] for e, m in zip(_entries, _lines) if "STALE" in m or "UNVERIFIED" in m]
+            if not BIG5_BAD or len(BIG5_BAD) >= len(_entries):
+                BIG5_OK = False
+                BIG5_WHY = ("Big 5 withheld: " + ", ".join(BIG5_BAD or ["stale"])
+                            + " not current. Americas below is unaffected.")
+            else:
+                BIG5_WHY = (", ".join(BIG5_BAD) + " withheld (not current); the other Big 5 leagues are boarded. "
+                            "Americas below is unaffected.")
             print(f"  {BIG5_WHY}")
         _newest = max(e[1] for e in _entries)
         FRESH_LINE = FR.board_line(_newest, checked=(_newest, _worst))
@@ -494,6 +501,8 @@ def run():
         pd.DataFrame(columns=["id", "date", "league", "home", "away", "p_home", "p_elo", "model"])
     if pseudo and BIG5_OK:
         rows = f[f.hg.isna()].copy()
+        if BIG5_BAD and "league" in rows.columns:
+            rows = rows[~rows.league.isin(BIG5_BAD)].copy()
         p = mdl.predict_proba(sc.transform(rows[E.FEATS].values))[:, 1]
         p = E.shrink(p, rows.min_gp.values, A0)
         # engine.shrink ramps to full weight at 6 games; say so while it is still ramping.
