@@ -52,6 +52,46 @@ ESPN_H = {}
 SRC = {"USA": "MLS", "MEX": "LigaMX", "BRA": "Brasileirao"}
 ESPN_SLUG = {"MLS": "usa.1", "LigaMX": "mex.1", "Brasileirao": "bra.1"}
 ESPN = "https://site.api.espn.com/apis/site/v2/sports/soccer"
+
+
+def espn_scoreboard(lg, slug, start, end, limit=300):
+    """ESPN scoreboard for a date range, as the parsed JSON: {"events": [...]}.
+
+    ESPN began rejecting the ranged form (dates=YYYYMMDD-YYYYMMDD) with HTTP 400 in
+    mid-September 2026. Big 5 got a day-by-day fallback then; this file did not, and
+    because the old code called .json() on the 400 without looking at the status it read
+    an error body as "no events". From 2026-09-21 the result backfill and the fixture feed
+    both returned nothing, the store trailed ESPN by a day or two on every run, and the
+    freshness guard withheld the Americas board for two months (2026-11-26 audit).
+
+    Tries the range once, then walks the days. Raises only if every single call fails, so
+    the caller's existing "feed unavailable" message still fires on a real outage.
+    """
+    rng = f"{start:%Y%m%d}-{end:%Y%m%d}"
+    try:
+        r = requests.get(f"{ESPN}/{slug}/scoreboard", headers=ESPN_H, timeout=45,
+                         params={"dates": rng, "limit": limit})
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    events, seen, ok, day = [], set(), 0, start
+    while day <= end:
+        try:
+            r = requests.get(f"{ESPN}/{slug}/scoreboard", headers=ESPN_H, timeout=45,
+                             params={"dates": day.strftime("%Y%m%d"), "limit": limit})
+            if r.status_code == 200:
+                ok += 1
+                for e in r.json().get("events", []):
+                    if e.get("id") not in seen:
+                        seen.add(e.get("id")); events.append(e)
+        except Exception:
+            pass
+        day += dt.timedelta(days=1)
+    if not ok:
+        raise RuntimeError(f"ESPN refused every call for {lg} {rng}")
+    print(f"  {lg}: ESPN ranged call refused; {len(events)} event(s) read day by day")
+    return {"events": events}
 FD = "https://www.football-data.co.uk/new"
 
 # Shots are absent from every one of these leagues, so `sot_d` and `sh_d` sit at exactly
@@ -136,8 +176,7 @@ def fetch_fixtures(known, alias, horizon_days=2, leagues=None):
         if leagues and lg not in leagues:
             continue
         try:
-            r = requests.get(f"{ESPN}/{slug}/scoreboard", headers=ESPN_H, timeout=45,
-                             params={"dates": rng, "limit": 200}).json()
+            r = espn_scoreboard(lg, slug, today, today + dt.timedelta(days=horizon_days), limit=200)
         except Exception as ex:
             print(f"  {lg}: fixture feed unavailable ({type(ex).__name__})")
             continue
@@ -212,8 +251,7 @@ def backfill_from_espn(store, alias, days=30):
 
         rng = f"{start:%Y%m%d}-{dt.date.today():%Y%m%d}"
         try:
-            r = requests.get(f"{ESPN}/{slug}/scoreboard", headers=ESPN_H, timeout=45,
-                             params={"dates": rng, "limit": 300}).json()
+            r = espn_scoreboard(lg, slug, start, dt.date.today())
         except Exception as ex:
             print(f"  {lg}: result backfill unavailable ({type(ex).__name__})")
             continue
